@@ -1,0 +1,89 @@
+storage:
+  sqlite-file: data/vvotes.db
+  busy-timeout-ms: 5000
+
+timezone: America/Santiago
+
+global:
+  broadcast-on-vote: true
+  suspicious-window-seconds: 10
+
+services:
+  force-player-command:
+    "40servidoresMC.es": "vote40"
+
+goals:
+  global-daily:
+    50:
+      - "crate key giveall llave_ámbar 1"
+    100:
+      - "crate key giveall llave_carmesí 1"
+    150:
+      - "crate key giveall llave_shards 1"
+  global-recurring:
+    start-after: 150
+    every: 10
+    commands:
+      - "envoy"
+  player-monthly:
+    4:
+      - "money give <player> 10000"
+      - "crate key give <player> llave_votos 2"
+    8:
+      - "money give <player> 12000"
+      - "crate key give <player> llave_votos 2"
+    12:
+      - "money give <player> 14000"
+      - "give <player> netherite_ingot 1"
+    16:
+      - "money give <player> 16000"
+      - "crate key give <player> llave_ámbar 1"
+    20:
+      - "money give <player> 18000"
+      - "crate key give <player> llave_votos 3"
+    24:
+      - "money give <player> 20000"
+      - "give <player> enchanted_golden_apple 1"
+    28:
+      - "money give <player> 22000"
+      - "crate key give <player> llave_ámbar 1"
+    32:
+      - "money give <player> 24000"
+      - "crate key give <player> llave_votos 3"
+      - "give <player> netherite_ingot 1"
+    36:
+      - "money give <player> 26000"
+      - "crate key give <player> llave_ámbar 1"
+    40:
+      - "money give <player> 30000"
+      - "crate key give <player> llave_carmesí 1"
+      - "give <player> enchanted_golden_apple 1"
+    44:
+      - "money give <player> 32000"
+      - "crate key give <player> llave_votos 4"
+    48:
+      - "money give <player> 36000"
+      - "crate key give <player> llave_ámbar 1"
+      - "give <player> netherite_ingot 2"
+    52:
+      - "money give <player> 42000"
+      - "give <player> enchanted_golden_apple 2"
+    56:
+      - "money give <player> 50000"
+      - "crate key give <player> llave_ámbar 2"
+    60:
+      - "money give <player> 70000"
+      - "crate key give <player> llave_carmesí 1"
+      - "give <player> mace 1"
+
+rewards:
+  vote:
+    - "money give <player> 2500"
+    - "crate key give <player> llave_votos 1"
+  streak-monthly: []
+
+monthly-draw:
+  enabled: true
+  min-votes: 1
+  reward-command: "lp user <player> parent addtemp arcano 30d"
+  auto-check-minutes: 5

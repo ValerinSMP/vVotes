@@ -1,0 +1,59 @@
+titles:
+  main: '&#6EE7B7&lᴠᴏᴛᴇs'
+  subtitle: '&fSistema de votos'
+  vote:
+    title: '&#34D399&lᴠᴏᴛᴏ ʀᴇᴄɪʙɪᴅᴏ'
+    subtitle: '&fGracias por apoyar el servidor'
+  global-goal:
+    title: '&#10B981&lᴍᴇᴛᴀ ɢʟᴏʙᴀʟ'
+    subtitle: '&fLa comunidad alcanzo %goal% votos'
+  monthly-goal:
+    title: '&#22C55E&lᴍᴇᴛᴀ ᴍᴇɴsᴜᴀʟ'
+    subtitle: '&fAlcanzaste %goal% votos este mes'
+
+actionbar:
+  vote-progress: '&fVotos hoy: &#34D399%daily% &8| &fMeta global: &#6EE7B7%next_global_goal%'
+  monthly-progress: '&fTus votos del mes: &#22C55E%monthly% &8| &fSiguiente: &#6EE7B7%next_monthly_goal%'
+
+messages:
+  prefix: '&8[&#34D399ᴠᴏᴛᴇs&8]&r '
+  player-only: '%prefix%Solo un jugador puede usar este comando.'
+  no-permission: '%prefix%No tienes permisos para esto.'
+  reload-ok: '%prefix%Configuracion recargada correctamente.'
+  admin-add-ok: '%prefix%Se agregaron &#6EE7B7%amount% &fvoto(s) a &#6EE7B7%player%&f.'
+  admin-reset-daily-ok: '%prefix%Contador global diario reiniciado.'
+  admin-reset-monthly-ok: '%prefix%Contador mensual reiniciado para &#6EE7B7%player%&f.'
+  usage-voteadmin: '%prefix%Uso: /voteadmin <reload|add|resetdaily|resetmonthly|drawmonthly>'
+  usage-voteadmin-add: '%prefix%Uso: /voteadmin add <jugador> <cantidad>'
+  usage-voteadmin-reset-monthly: '%prefix%Uso: /voteadmin resetmonthly <jugador>'
+  monthly-bonus-inline: ' &8(&fvoto &#22C55E%monthly_milestone% &fveces este mes y recibio premios extra&8)'
+  vote-help:
+  - ''
+  - '%prefix%&#6EE7B7Comandos de votos'
+  - '%prefix%&#34D399/vote &8- &fMuestra esta ayuda.'
+  - '%prefix%&#34D399/votestats &8- &fMuestra tus estadisticas de votos.'
+  - ''
+  admin-drawmonthly-success: '%prefix%Sorteo de &#6EE7B7%month% &frealizado. Ganador: &#34D399%winner% &8| &fVotos top: &#34D399%votes% &8| &fEmpatados: &#34D399%candidates%'
+  admin-drawmonthly-no-participants: '%prefix%No hay participantes validos para &#6EE7B7%month% &8(minimo actual/top: &#34D399%votes%&8).'
+  admin-drawmonthly-already-drawn: '%prefix%El sorteo de &#6EE7B7%month% &fya fue ejecutado.'
+  admin-drawmonthly-disabled: '%prefix%El sorteo mensual esta desactivado en config.'
+  admin-drawmonthly-invalid-month: '%prefix%Mes invalido: &#FFB347%month% &fusa formato YYYY-MM.'
+  admin-drawmonthly-error: '%prefix%Error ejecutando sorteo mensual: &#FFB347%error%'
+  vote-status:
+  - ''
+  - '%prefix%&#6EE7B7Tus estadisticas de votos'
+  - '%prefix%Total: &#34D399%total% &8| &fHoy: &#34D399%daily% &8| &fMes: &#34D399%monthly%'
+  - '%prefix%Racha mensual: &#22C55E%streak_monthly%'
+  - '%prefix%Global hoy: &#10B981%global_daily% &8| &fProxima meta global: &#6EE7B7%next_global_goal%'
+  - '%prefix%Proxima meta mensual: &#6EE7B7%next_monthly_goal%'
+  - ''
+  vote-offline-skip: '%prefix%El voto de &#6EE7B7%player% &fno se proceso porque no estaba online.'
+  vote-broadcast:
+  - ''
+  - '%prefix%&#34D399%player% &fha votado por el servidor y ha recibido sus recompensas, apoyanos con &#22C55E/vote%monthly_bonus%'
+  - ''
+  draw-monthly-winner-broadcast:
+  - ''
+  - '%prefix%Sorteo mensual &#6EE7B7%month% &fcompletado.'
+  - '%prefix%Ganador: &#34D399%player% &f(con &#34D399%votes% &fvotos top, empatados: &#34D399%candidates%&f).'
+  - ''

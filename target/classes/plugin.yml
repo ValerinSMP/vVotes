@@ -1,0 +1,24 @@
+name: vVotes
+version: '1.0.0'
+main: com.valerinsmp.vvotes.VVotesPlugin
+api-version: '1.21'
+authors: [ValerinSMP]
+softdepend: [PlaceholderAPI, VotifierPlus]
+commands:
+  vote:
+    description: Ayuda del sistema de votos.
+    usage: /vote
+    permission: vvotes.use
+  votestats:
+    description: Muestra tus estadisticas de votos.
+    usage: /votestats
+    permission: vvotes.use
+  voteadmin:
+    description: Administracion de vVotes.
+    usage: /voteadmin <reload|add|resetdaily|resetmonthly|drawmonthly>
+    permission: vvotes.admin
+permissions:
+  vvotes.use:
+    default: true
+  vvotes.admin:
+    default: op
