@@ -10,7 +10,8 @@ global:
 
 services:
   force-player-command:
-    "40servidoresMC.es": "vote40"
+    "40servidoresMC.es":
+      - "mivoto40"
 
 goals:
   global-daily:
@@ -87,3 +88,11 @@ monthly-draw:
   min-votes: 1
   reward-command: "lp user <player> parent addtemp arcano 30d"
   auto-check-minutes: 5
+
+double-site-bonus:
+  enabled: true
+  required-sites: 2
+  placeholder-icon: "☁"
+  message: "%prefix%&a¡Has votado en los 2 sitios y ganado Fly por 1 hora!"
+  commands:
+    - "lp user %player% permission settemp protectionblocks.fly true 1h server=survival"

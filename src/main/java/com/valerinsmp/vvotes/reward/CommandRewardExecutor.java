@@ -18,6 +18,7 @@ public final class CommandRewardExecutor {
             String parsed = command;
             for (Map.Entry<String, String> entry : placeholders.entrySet()) {
                 parsed = parsed.replace("<" + entry.getKey() + ">", entry.getValue());
+                parsed = parsed.replace("%" + entry.getKey() + "%", entry.getValue());
             }
             if (parsed.isBlank()) {
                 continue;

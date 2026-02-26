@@ -132,6 +132,11 @@ public final class MessageService {
     }
 
     public Component parse(String line) {
+        // Prefer legacy parser when '&' colors are present, even if the text includes
+        // command placeholders like <jugador> that are not MiniMessage tags.
+        if (line.contains("&")) {
+            return legacySerializer.deserialize(convertHexToLegacy(line));
+        }
         if (line.contains("<") && line.contains(">")) {
             try {
                 return miniMessage.deserialize(line);

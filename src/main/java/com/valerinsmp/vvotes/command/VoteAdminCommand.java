@@ -73,6 +73,98 @@ public final class VoteAdminCommand implements CommandExecutor, TabCompleter {
                         "player", target.getName() == null ? args[1] : target.getName()
                 ));
             }
+            case "adddaily" -> {
+                if (args.length < 3) {
+                    plugin.getMessageService().send(sender, "usage-voteadmin-adddaily");
+                    return true;
+                }
+                OfflinePlayer target = Bukkit.getOfflinePlayer(args[1]);
+                int amount;
+                try {
+                    amount = Integer.parseInt(args[2]);
+                } catch (NumberFormatException exception) {
+                    plugin.getMessageService().send(sender, "usage-voteadmin-adddaily");
+                    return true;
+                }
+                if (amount <= 0) {
+                    plugin.getMessageService().send(sender, "usage-voteadmin-adddaily");
+                    return true;
+                }
+                double updated = plugin.getVoteService().adjustPlayerDailyVotes(target, amount);
+                plugin.getMessageService().send(sender, "admin-adddaily-ok", Map.of(
+                        "player", target.getName() == null ? args[1] : target.getName(),
+                        "amount", Integer.toString(amount),
+                        "daily", plugin.getVoteService().formatDouble(Math.max(0, updated))
+                ));
+            }
+            case "removedaily" -> {
+                if (args.length < 3) {
+                    plugin.getMessageService().send(sender, "usage-voteadmin-removedaily");
+                    return true;
+                }
+                OfflinePlayer target = Bukkit.getOfflinePlayer(args[1]);
+                int amount;
+                try {
+                    amount = Integer.parseInt(args[2]);
+                } catch (NumberFormatException exception) {
+                    plugin.getMessageService().send(sender, "usage-voteadmin-removedaily");
+                    return true;
+                }
+                if (amount <= 0) {
+                    plugin.getMessageService().send(sender, "usage-voteadmin-removedaily");
+                    return true;
+                }
+                double updated = plugin.getVoteService().adjustPlayerDailyVotes(target, -amount);
+                plugin.getMessageService().send(sender, "admin-removedaily-ok", Map.of(
+                        "player", target.getName() == null ? args[1] : target.getName(),
+                        "amount", Integer.toString(amount),
+                        "daily", plugin.getVoteService().formatDouble(Math.max(0, updated))
+                ));
+            }
+            case "addglobaldaily" -> {
+                if (args.length < 2) {
+                    plugin.getMessageService().send(sender, "usage-voteadmin-addglobaldaily");
+                    return true;
+                }
+                int amount;
+                try {
+                    amount = Integer.parseInt(args[1]);
+                } catch (NumberFormatException exception) {
+                    plugin.getMessageService().send(sender, "usage-voteadmin-addglobaldaily");
+                    return true;
+                }
+                if (amount <= 0) {
+                    plugin.getMessageService().send(sender, "usage-voteadmin-addglobaldaily");
+                    return true;
+                }
+                double updated = plugin.getVoteService().adjustGlobalDailyVotes(amount);
+                plugin.getMessageService().send(sender, "admin-addglobaldaily-ok", Map.of(
+                        "amount", Integer.toString(amount),
+                        "daily_global", plugin.getVoteService().formatDouble(Math.max(0, updated))
+                ));
+            }
+            case "removeglobaldaily" -> {
+                if (args.length < 2) {
+                    plugin.getMessageService().send(sender, "usage-voteadmin-removeglobaldaily");
+                    return true;
+                }
+                int amount;
+                try {
+                    amount = Integer.parseInt(args[1]);
+                } catch (NumberFormatException exception) {
+                    plugin.getMessageService().send(sender, "usage-voteadmin-removeglobaldaily");
+                    return true;
+                }
+                if (amount <= 0) {
+                    plugin.getMessageService().send(sender, "usage-voteadmin-removeglobaldaily");
+                    return true;
+                }
+                double updated = plugin.getVoteService().adjustGlobalDailyVotes(-amount);
+                plugin.getMessageService().send(sender, "admin-removeglobaldaily-ok", Map.of(
+                        "amount", Integer.toString(amount),
+                        "daily_global", plugin.getVoteService().formatDouble(Math.max(0, updated))
+                ));
+            }
             case "drawmonthly" -> {
                 String monthKey = args.length >= 2 ? args[1] : null;
                 String executor = sender.getName() == null || sender.getName().isBlank() ? "console" : sender.getName();
@@ -111,9 +203,10 @@ public final class VoteAdminCommand implements CommandExecutor, TabCompleter {
             return Collections.emptyList();
         }
         if (args.length == 1) {
-            return filter(List.of("reload", "add", "resetdaily", "resetmonthly", "drawmonthly"), args[0]);
+            return filter(List.of("reload", "add", "resetdaily", "resetmonthly", "adddaily", "removedaily", "addglobaldaily", "removeglobaldaily", "drawmonthly"), args[0]);
         }
-        if (args.length == 2 && (args[0].equalsIgnoreCase("add") || args[0].equalsIgnoreCase("resetmonthly"))) {
+        if (args.length == 2 && (args[0].equalsIgnoreCase("add") || args[0].equalsIgnoreCase("resetmonthly")
+                || args[0].equalsIgnoreCase("adddaily") || args[0].equalsIgnoreCase("removedaily"))) {
             List<String> names = new ArrayList<>();
             Bukkit.getOnlinePlayers().forEach(player -> names.add(player.getName()));
             return filter(names, args[1]);
@@ -123,8 +216,14 @@ public final class VoteAdminCommand implements CommandExecutor, TabCompleter {
             java.time.YearMonth now = java.time.YearMonth.now(zone);
             return filter(List.of(now.minusMonths(1).toString(), now.toString()), args[1]);
         }
-        if (args.length == 3 && args[0].equalsIgnoreCase("add")) {
-            return filter(List.of("1", "5", "10"), args[2]);
+        if (args.length == 3 && (args[0].equalsIgnoreCase("add")
+                || args[0].equalsIgnoreCase("adddaily")
+                || args[0].equalsIgnoreCase("removedaily"))) {
+            return filter(List.of("1", "5", "10", "25", "50"), args[2]);
+        }
+        if (args.length == 2 && (args[0].equalsIgnoreCase("addglobaldaily")
+                || args[0].equalsIgnoreCase("removeglobaldaily"))) {
+            return filter(List.of("1", "5", "10", "25", "50"), args[1]);
         }
         return Collections.emptyList();
     }

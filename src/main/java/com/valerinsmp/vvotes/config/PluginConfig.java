@@ -11,7 +11,7 @@ public final class PluginConfig {
     private final String timezone;
     private final boolean broadcastOnVote;
     private final int suspiciousWindowSeconds;
-    private final Map<String, String> forcedServiceCommands;
+    private final Map<String, List<String>> forcedServiceCommands;
     private final TreeMap<Integer, List<String>> globalDailyGoals;
     private final int globalRecurringStart;
     private final int globalRecurringEvery;
@@ -23,6 +23,11 @@ public final class PluginConfig {
     private final int monthlyDrawMinVotes;
     private final String monthlyDrawRewardCommand;
     private final int monthlyDrawAutoCheckMinutes;
+    private final boolean doubleSiteBonusEnabled;
+    private final int doubleSiteBonusRequiredSites;
+    private final String doubleSiteBonusMessage;
+    private final List<String> doubleSiteBonusCommands;
+    private final String doubleSiteTodayIcon;
 
     public PluginConfig(
             String sqliteFile,
@@ -30,7 +35,7 @@ public final class PluginConfig {
             String timezone,
             boolean broadcastOnVote,
             int suspiciousWindowSeconds,
-            Map<String, String> forcedServiceCommands,
+            Map<String, List<String>> forcedServiceCommands,
             TreeMap<Integer, List<String>> globalDailyGoals,
             int globalRecurringStart,
             int globalRecurringEvery,
@@ -41,7 +46,12 @@ public final class PluginConfig {
             boolean monthlyDrawEnabled,
             int monthlyDrawMinVotes,
             String monthlyDrawRewardCommand,
-            int monthlyDrawAutoCheckMinutes
+            int monthlyDrawAutoCheckMinutes,
+            boolean doubleSiteBonusEnabled,
+            int doubleSiteBonusRequiredSites,
+            String doubleSiteBonusMessage,
+            List<String> doubleSiteBonusCommands,
+            String doubleSiteTodayIcon
     ) {
         this.sqliteFile = sqliteFile;
         this.busyTimeoutMs = busyTimeoutMs;
@@ -60,6 +70,11 @@ public final class PluginConfig {
         this.monthlyDrawMinVotes = monthlyDrawMinVotes;
         this.monthlyDrawRewardCommand = monthlyDrawRewardCommand;
         this.monthlyDrawAutoCheckMinutes = monthlyDrawAutoCheckMinutes;
+        this.doubleSiteBonusEnabled = doubleSiteBonusEnabled;
+        this.doubleSiteBonusRequiredSites = doubleSiteBonusRequiredSites;
+        this.doubleSiteBonusMessage = doubleSiteBonusMessage;
+        this.doubleSiteBonusCommands = doubleSiteBonusCommands;
+        this.doubleSiteTodayIcon = doubleSiteTodayIcon;
     }
 
     public String sqliteFile() {
@@ -82,11 +97,11 @@ public final class PluginConfig {
         return suspiciousWindowSeconds;
     }
 
-    public String forcedServiceCommand(String serviceName) {
+    public List<String> forcedServiceCommands(String serviceName) {
         if (serviceName == null) {
-            return null;
+            return Collections.emptyList();
         }
-        return forcedServiceCommands.get(serviceName.toLowerCase());
+        return forcedServiceCommands.getOrDefault(serviceName.toLowerCase(), Collections.emptyList());
     }
 
     public TreeMap<Integer, List<String>> globalDailyGoals() {
@@ -133,6 +148,26 @@ public final class PluginConfig {
         return monthlyDrawAutoCheckMinutes;
     }
 
+    public boolean doubleSiteBonusEnabled() {
+        return doubleSiteBonusEnabled;
+    }
+
+    public int doubleSiteBonusRequiredSites() {
+        return doubleSiteBonusRequiredSites;
+    }
+
+    public String doubleSiteBonusMessage() {
+        return doubleSiteBonusMessage;
+    }
+
+    public List<String> doubleSiteBonusCommands() {
+        return doubleSiteBonusCommands;
+    }
+
+    public String doubleSiteTodayIcon() {
+        return doubleSiteTodayIcon;
+    }
+
     public static PluginConfig defaultConfig() {
         return new PluginConfig(
                 "data/vvotes.db",
@@ -151,7 +186,12 @@ public final class PluginConfig {
                 true,
                 1,
                 "lp user <player> parent addtemp arcano 30d",
-                5
+                5,
+                true,
+                2,
+                "%player% &a¡Has votado en los 2 sitios y ganado Fly por 1 hora!",
+                List.of("lp user %player% permission settemp protectionblocks.fly true 1h server=survival"),
+                "☁"
         );
     }
 }

@@ -13,9 +13,15 @@ import com.valerinsmp.vvotes.service.SoundService;
 import com.valerinsmp.vvotes.service.VoteService;
 import org.bukkit.Bukkit;
 import org.bukkit.command.PluginCommand;
+import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.event.HandlerList;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitTask;
+
+import java.io.File;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
 
 public final class VVotesPlugin extends JavaPlugin {
 
@@ -32,6 +38,7 @@ public final class VVotesPlugin extends JavaPlugin {
         saveDefaultConfig();
         saveResourceIfMissing("messages.yml");
         saveResourceIfMissing("sound.yml");
+        ensureYamlDefaults();
 
         this.configService = new ConfigService(this);
         this.messageService = new MessageService(this, configService);
@@ -66,6 +73,7 @@ public final class VVotesPlugin extends JavaPlugin {
             }
 
             reloadConfig();
+            ensureYamlDefaults();
             configService.reload();
             messageService.reload();
             soundService.reload();
@@ -154,6 +162,49 @@ public final class VVotesPlugin extends JavaPlugin {
         if (monthlyDrawTask != null) {
             monthlyDrawTask.cancel();
             monthlyDrawTask = null;
+        }
+    }
+
+    private void ensureYamlDefaults() {
+        // Main config.yml
+        getConfig().options().copyDefaults(true);
+        saveConfig();
+        reloadConfig();
+
+        // Extra yamls
+        mergeYamlDefaults("messages.yml");
+        mergeYamlDefaults("sound.yml");
+    }
+
+    private void mergeYamlDefaults(String resourceName) {
+        File file = new File(getDataFolder(), resourceName);
+        if (!file.exists()) {
+            saveResource(resourceName, false);
+            return;
+        }
+
+        try (InputStream input = getResource(resourceName)) {
+            if (input == null) {
+                return;
+            }
+
+            YamlConfiguration current = YamlConfiguration.loadConfiguration(file);
+            YamlConfiguration defaults = YamlConfiguration.loadConfiguration(new InputStreamReader(input, StandardCharsets.UTF_8));
+
+            boolean changed = false;
+            for (String path : defaults.getKeys(true)) {
+                if (!current.contains(path)) {
+                    current.set(path, defaults.get(path));
+                    changed = true;
+                }
+            }
+
+            if (changed) {
+                current.save(file);
+                getLogger().info("Se agregaron nuevas claves por defecto en " + resourceName);
+            }
+        } catch (Exception exception) {
+            getLogger().warning("No se pudieron fusionar defaults de " + resourceName + ": " + exception.getMessage());
         }
     }
 }

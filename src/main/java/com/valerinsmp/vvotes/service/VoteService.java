@@ -155,6 +155,26 @@ public final class VoteService {
         }
     }
 
+    public double adjustGlobalDailyVotes(int delta) {
+        DateContext context = currentContext();
+        try (Connection connection = database.getConnection()) {
+            connection.setAutoCommit(false);
+            try {
+                GlobalState state = fetchGlobalState(connection, context);
+                double updated = Math.max(0, state.dailyVotes + delta);
+                updateGlobalState(connection, updated, context.dayKey);
+                connection.commit();
+                return updated;
+            } catch (SQLException exception) {
+                connection.rollback();
+                throw exception;
+            }
+        } catch (SQLException exception) {
+            plugin.getLogger().warning("No se pudo ajustar contador global diario: " + exception.getMessage());
+            return -1;
+        }
+    }
+
     public void forceResetPlayerMonthly(OfflinePlayer target) {
         if (target.getUniqueId() == null) {
             return;
@@ -168,6 +188,40 @@ public final class VoteService {
             statement.executeUpdate();
         } catch (SQLException exception) {
             plugin.getLogger().warning("No se pudo reiniciar mensual de " + target.getName() + ": " + exception.getMessage());
+        }
+    }
+
+    public double adjustPlayerDailyVotes(OfflinePlayer target, int delta) {
+        if (target.getUniqueId() == null) {
+            return -1;
+        }
+        UUID uuid = target.getUniqueId();
+        String playerName = target.getName() == null ? uuid.toString() : target.getName();
+        DateContext context = currentContext();
+
+        try (Connection connection = database.getConnection()) {
+            connection.setAutoCommit(false);
+            try {
+                PlayerStats stats = normalizeForCurrentPeriod(connection, fetchOrCreateStats(connection, uuid, playerName), context);
+                double updatedDaily = Math.max(0, stats.dailyVotes() + delta);
+                try (PreparedStatement statement = connection.prepareStatement(
+                        "UPDATE players SET name = ?, daily_votes = ?, last_vote_day = ?, last_vote_epoch = ? WHERE uuid = ?")) {
+                    statement.setString(1, playerName);
+                    statement.setDouble(2, updatedDaily);
+                    statement.setString(3, context.dayKey);
+                    statement.setLong(4, context.epochSeconds);
+                    statement.setString(5, uuid.toString());
+                    statement.executeUpdate();
+                }
+                connection.commit();
+                return updatedDaily;
+            } catch (SQLException exception) {
+                connection.rollback();
+                throw exception;
+            }
+        } catch (SQLException exception) {
+            plugin.getLogger().warning("No se pudo ajustar contador diario de " + playerName + ": " + exception.getMessage());
+            return -1;
         }
     }
 
@@ -219,6 +273,26 @@ public final class VoteService {
         return -1;
     }
 
+    public String getDoubleSiteTodayIcon(UUID uuid) {
+        PluginConfig config = configService.get();
+        if (!config.doubleSiteBonusEnabled()) {
+            return "";
+        }
+        if (uuid == null) {
+            return "";
+        }
+        DateContext context = currentContext();
+        try (Connection connection = database.getConnection()) {
+            int distinctSites = countDistinctServicesToday(connection, uuid, context);
+            if (distinctSites >= config.doubleSiteBonusRequiredSites()) {
+                return config.doubleSiteTodayIcon();
+            }
+        } catch (SQLException exception) {
+            plugin.getLogger().warning("Error leyendo placeholder double-site: " + exception.getMessage());
+        }
+        return "";
+    }
+
     public String formatDouble(double value) {
         if (value == Math.floor(value)) {
             return String.format(Locale.US, "%.0f", value);
@@ -238,6 +312,7 @@ public final class VoteService {
         Map<String, String> placeholders = new HashMap<>();
         boolean playerGoalCompleted = false;
         boolean globalGoalCompleted = false;
+        boolean doubleSiteBonusCompleted = false;
         int highestMonthlyMilestoneTriggered = 0;
 
         try (Connection connection = database.getConnection()) {
@@ -266,6 +341,16 @@ public final class VoteService {
 
             insertVoteLog(connection, uuid, playerName, serviceName, amount, amount);
             fillPlaceholders(placeholders, uuid, playerName, serviceName, amount, newTotal, newDaily, newMonthly, streakMonthly, newGlobalDaily);
+
+            if (executeVoteRewards && config.doubleSiteBonusEnabled()) {
+                int distinctSitesToday = countDistinctServicesToday(connection, uuid, context);
+                placeholders.put("double_site_today_count", Integer.toString(distinctSitesToday));
+                if (distinctSitesToday >= config.doubleSiteBonusRequiredSites()
+                        && tryClaimPlayerGoal(connection, uuid, "double_site_daily", config.doubleSiteBonusRequiredSites(), context.dayKey)) {
+                    pendingCommands.add(config.doubleSiteBonusCommands());
+                    doubleSiteBonusCompleted = true;
+                }
+            }
 
             if (executeVoteRewards) {
                 pendingCommands.add(config.voteRewards());
@@ -314,6 +399,11 @@ public final class VoteService {
             } else {
                 placeholders.put("monthly_bonus", "");
             }
+            if (doubleSiteBonusCompleted) {
+                placeholders.put("double_site_bonus", messageService.text("double-site-bonus-inline", placeholders));
+            } else {
+                placeholders.put("double_site_bonus", "");
+            }
 
             if (config.broadcastOnVote()) {
                 for (var line : messageService.messages("vote-broadcast", placeholders)) {
@@ -328,6 +418,13 @@ public final class VoteService {
                 showTitle(player, "vote.title", "vote.subtitle", placeholders);
                 if (playerGoalCompleted) {
                     soundService.play(player, "goal.completed");
+                }
+                if (doubleSiteBonusCompleted) {
+                    String bonusMessage = config.doubleSiteBonusMessage();
+                    if (bonusMessage != null && !bonusMessage.isBlank()) {
+                        String withPrefix = bonusMessage.replace("%prefix%", messageService.text("prefix", Map.of()));
+                        player.sendMessage(messageService.parse(messageService.applyPlaceholders(withPrefix, placeholders)));
+                    }
                 }
                 runForcedServiceCommand(player, serviceName);
             }
@@ -571,6 +668,27 @@ public final class VoteService {
         }
     }
 
+    private int countDistinctServicesToday(Connection connection, UUID uuid, DateContext context) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT COUNT(DISTINCT LOWER(service_name)) AS total
+                FROM vote_logs
+                WHERE uuid = ?
+                  AND created_epoch >= ?
+                  AND created_epoch < ?
+                  AND LOWER(service_name) <> 'manual'
+                """)) {
+            statement.setString(1, uuid.toString());
+            statement.setLong(2, context.dayStartEpoch);
+            statement.setLong(3, context.nextDayEpoch);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                if (resultSet.next()) {
+                    return resultSet.getInt("total");
+                }
+            }
+        }
+        return 0;
+    }
+
     private void upsertMonthlySnapshot(Connection connection, UUID uuid, String playerName, String monthKey, double votes, long epoch) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement("""
                 INSERT INTO monthly_snapshots(uuid, player_name, month_key, votes, last_update_epoch)
@@ -662,20 +780,42 @@ public final class VoteService {
     private DateContext currentContext() {
         ZoneId zoneId = ZoneId.of(configService.get().timezone());
         ZonedDateTime now = ZonedDateTime.now(zoneId);
+        ZonedDateTime dayStart = now.toLocalDate().atStartOfDay(zoneId);
+        ZonedDateTime nextDayStart = dayStart.plusDays(1);
         String dayKey = now.toLocalDate().toString();
         String monthKey = YearMonth.from(now).toString();
-        return new DateContext(dayKey, monthKey, now.toEpochSecond());
+        return new DateContext(dayKey, monthKey, now.toEpochSecond(), dayStart.toEpochSecond(), nextDayStart.toEpochSecond());
     }
 
     private void runForcedServiceCommand(Player player, String serviceName) {
-        String command = configService.get().forcedServiceCommand(serviceName);
-        if (command == null || command.isBlank()) {
+        List<String> commands = configService.get().forcedServiceCommands(serviceName);
+        if (commands.isEmpty()) {
+            plugin.getLogger().warning("No hay comandos forzados configurados para servicio de voto: " + serviceName);
             return;
         }
-        boolean executed = player.performCommand(command.startsWith("/") ? command.substring(1) : command);
-        if (!executed) {
-            plugin.getLogger().warning("No se pudo ejecutar comando forzado para servicio " + serviceName + ": " + command);
-        }
+        Bukkit.getScheduler().runTask(plugin, () -> {
+            if (!player.isOnline()) {
+                return;
+            }
+            for (String raw : commands) {
+                String command = raw.startsWith("/") ? raw.substring(1) : raw;
+                try {
+                    // Ejecuta el comando con el jugador como sender.
+                    boolean ok = Bukkit.dispatchCommand(player, command);
+                    if (ok) {
+                        plugin.getLogger().info("Comando forzado por voto ejecutado para " + player.getName() + " (" + serviceName + "): /" + command);
+                        return;
+                    }
+                    // Fallback por si el plugin depende de preprocess/chat.
+                    player.chat("/" + command);
+                    plugin.getLogger().info("Comando forzado por voto fallback chat para " + player.getName() + " (" + serviceName + "): /" + command);
+                    return;
+                } catch (Exception exception) {
+                    plugin.getLogger().warning("Fallo comando forzado por voto para " + player.getName() + " (" + serviceName + "): /" + command + " -> " + exception.getMessage());
+                }
+            }
+            plugin.getLogger().warning("No se pudo ejecutar ningun comando forzado para " + player.getName() + " en servicio " + serviceName + ": " + String.join(", ", commands));
+        });
     }
 
     private int nextRecurringThreshold(int value, int step) {
@@ -692,7 +832,7 @@ public final class VoteService {
         player.showTitle(title);
     }
 
-    private record DateContext(String dayKey, String monthKey, long epochSeconds) {
+    private record DateContext(String dayKey, String monthKey, long epochSeconds, long dayStartEpoch, long nextDayEpoch) {
     }
 
     private record GlobalState(double dailyVotes, String dayKey) {

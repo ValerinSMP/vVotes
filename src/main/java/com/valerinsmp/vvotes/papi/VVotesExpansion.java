@@ -53,6 +53,7 @@ public final class VVotesExpansion extends PlaceholderExpansion {
             case "global_daily" -> voteService.formatDouble(voteService.getGlobalDailyVotes());
             case "next_global_goal" -> Integer.toString(voteService.nextGlobalGoal(voteService.getGlobalDailyVotes()));
             case "next_monthly_goal" -> Integer.toString(voteService.nextMonthlyGoal(stats.monthlyVotes()));
+            case "double_site_today_icon", "voted_two_sites_today_icon" -> voteService.getDoubleSiteTodayIcon(player.getUniqueId());
             default -> null;
         };
     }
