@@ -144,6 +144,82 @@ public final class VoteService {
         return configService.get().timezone();
     }
 
+    public List<TopMonthEntry> getTopMonth(String monthKey, int limit) {
+        if (monthKey == null || monthKey.isBlank()) {
+            monthKey = YearMonth.now(ZoneId.of(configService.get().timezone())).toString();
+        }
+        List<TopMonthEntry> entries = new ArrayList<>();
+        try (Connection connection = database.getConnection();
+             PreparedStatement statement = connection.prepareStatement(
+                     "SELECT player_name, votes FROM monthly_snapshots WHERE month_key = ? ORDER BY votes DESC LIMIT ?")) {
+            statement.setString(1, monthKey);
+            statement.setInt(2, limit);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                int pos = 1;
+                while (resultSet.next()) {
+                    entries.add(new TopMonthEntry(pos++, resultSet.getString("player_name"), resultSet.getDouble("votes")));
+                }
+            }
+        } catch (SQLException exception) {
+            plugin.getLogger().warning("Error consultando top mensual: " + exception.getMessage());
+        }
+        return entries;
+    }
+
+    public record TopMonthEntry(int position, String playerName, double votes) {}
+
+    public DrawHistoryResult getDrawHistory(String monthKey) {
+        if (monthKey == null || monthKey.isBlank()) {
+            monthKey = YearMonth.now(ZoneId.of(configService.get().timezone())).minusMonths(1).toString();
+        }
+        try {
+            YearMonth.parse(monthKey);
+        } catch (Exception e) {
+            return DrawHistoryResult.invalidMonth(monthKey);
+        }
+        try (Connection connection = database.getConnection();
+             PreparedStatement statement = connection.prepareStatement(
+                     "SELECT winner_name, winner_uuid, top_votes, candidates_count, executed_by, executed_epoch FROM monthly_draw_history WHERE month_key = ?")) {
+            statement.setString(1, monthKey);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                if (!resultSet.next()) {
+                    return DrawHistoryResult.notFound(monthKey);
+                }
+                return DrawHistoryResult.found(
+                        monthKey,
+                        resultSet.getString("winner_name"),
+                        resultSet.getString("winner_uuid"),
+                        resultSet.getDouble("top_votes"),
+                        resultSet.getInt("candidates_count"),
+                        resultSet.getString("executed_by"),
+                        resultSet.getLong("executed_epoch")
+                );
+            }
+        } catch (SQLException exception) {
+            plugin.getLogger().warning("Error consultando historial sorteo: " + exception.getMessage());
+            return DrawHistoryResult.error(monthKey, exception.getMessage());
+        }
+    }
+
+    public record DrawHistoryResult(Status status, String monthKey, String winnerName, String winnerUuid,
+                                    double topVotes, int candidatesCount, String executedBy, long executedEpoch, String error) {
+        public enum Status { FOUND, NOT_FOUND, INVALID_MONTH, ERROR }
+
+        public static DrawHistoryResult found(String monthKey, String winnerName, String winnerUuid,
+                                              double topVotes, int candidatesCount, String executedBy, long executedEpoch) {
+            return new DrawHistoryResult(Status.FOUND, monthKey, winnerName, winnerUuid, topVotes, candidatesCount, executedBy, executedEpoch, "");
+        }
+        public static DrawHistoryResult notFound(String monthKey) {
+            return new DrawHistoryResult(Status.NOT_FOUND, monthKey, "", "", 0, 0, "", 0, "");
+        }
+        public static DrawHistoryResult invalidMonth(String monthKey) {
+            return new DrawHistoryResult(Status.INVALID_MONTH, monthKey, "", "", 0, 0, "", 0, "");
+        }
+        public static DrawHistoryResult error(String monthKey, String error) {
+            return new DrawHistoryResult(Status.ERROR, monthKey, "", "", 0, 0, "", 0, error);
+        }
+    }
+
     public void forceResetGlobalDaily() {
         DateContext context = currentContext();
         try (Connection connection = database.getConnection();
@@ -556,10 +632,29 @@ public final class VoteService {
             }
         }
 
-        try (PreparedStatement statement = connection.prepareStatement("INSERT INTO players(uuid, name) VALUES (?, ?)")) {
+        try (PreparedStatement statement = connection.prepareStatement("INSERT OR IGNORE INTO players(uuid, name) VALUES (?, ?)")) {
             statement.setString(1, uuid.toString());
             statement.setString(2, name);
             statement.executeUpdate();
+        }
+
+        try (PreparedStatement statement = connection.prepareStatement("SELECT * FROM players WHERE uuid = ?")) {
+            statement.setString(1, uuid.toString());
+            try (ResultSet resultSet = statement.executeQuery()) {
+                if (resultSet.next()) {
+                    return new PlayerStats(
+                            uuid,
+                            resultSet.getString("name"),
+                            resultSet.getDouble("total_votes"),
+                            resultSet.getDouble("daily_votes"),
+                            resultSet.getDouble("monthly_votes"),
+                            resultSet.getInt("streak_monthly"),
+                            resultSet.getString("last_vote_day"),
+                            resultSet.getString("last_month_key"),
+                            resultSet.getLong("last_vote_epoch")
+                    );
+                }
+            }
         }
 
         return PlayerStats.empty(uuid, name);
