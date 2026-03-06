@@ -125,7 +125,7 @@ public final class VVotesPlugin extends JavaPlugin {
     }
 
     private void registerListeners() {
-        getServer().getPluginManager().registerEvents(new VoteListener(voteService), this);
+        getServer().getPluginManager().registerEvents(new VoteListener(this, voteService), this);
     }
 
     private void registerPlaceholderExpansion() {

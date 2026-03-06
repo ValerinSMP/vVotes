@@ -71,36 +71,6 @@ public final class VoteService {
         });
     }
 
-    public void savePendingVote(String playerName, String serviceName) {
-        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
-            try {
-                repo.insertPendingVote(repo.connection(), playerName, serviceName);
-                Bukkit.getScheduler().runTask(plugin, () ->
-                        messageService.send(Bukkit.getConsoleSender(), "vote-offline-pending", Map.of("player", playerName)));
-            } catch (SQLException exception) {
-                plugin.getLogger().warning("No se pudo guardar voto pendiente de " + playerName + ": " + exception.getMessage());
-            }
-        });
-    }
-
-    public void deliverPendingVotes(Player player) {
-        UUID uuid = player.getUniqueId();
-        String name = player.getName();
-        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
-            try {
-                Connection connection = repo.connection();
-                List<VoteRepository.PendingVoteRow> pending = repo.fetchPendingVotes(connection, name);
-                for (VoteRepository.PendingVoteRow row : pending) {
-                    repo.deletePendingVote(connection, row.id());
-                    processVote(uuid, name, row.serviceName(), 1.0, true);
-                }
-                if (!pending.isEmpty()) statsCache.remove(uuid);
-            } catch (SQLException exception) {
-                plugin.getLogger().warning("Error entregando votos pendientes a " + name + ": " + exception.getMessage());
-            }
-        });
-    }
-
     public void addManualVotes(OfflinePlayer target, int amount) {
         if (amount <= 0 || target.getUniqueId() == null) return;
         String name = target.getName() == null ? target.getUniqueId().toString() : target.getName();
