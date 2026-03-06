@@ -62,6 +62,7 @@ messages:
   - '%prefix%Proxima meta mensual: &#6EE7B7%next_monthly_goal%'
   - ''
   vote-offline-skip: '%prefix%El voto de &#6EE7B7%player% &fno se proceso porque no estaba online.'
+  vote-offline-pending: '%prefix%El voto de &#6EE7B7%player% &fse guardara y entregara cuando se conecte.'
   vote-broadcast:
   - ''
   - '%prefix%&#34D399%player% &fha votado por el servidor y ha recibido sus recompensas, apoyanos con &#22C55E/vote%monthly_bonus%%double_site_bonus%'

@@ -10,6 +10,7 @@ import com.valerinsmp.vvotes.papi.VVotesExpansion;
 import com.valerinsmp.vvotes.reward.CommandRewardExecutor;
 import com.valerinsmp.vvotes.service.MessageService;
 import com.valerinsmp.vvotes.service.SoundService;
+import com.valerinsmp.vvotes.service.MonthlyDrawResult;
 import com.valerinsmp.vvotes.service.VoteService;
 import org.bukkit.Bukkit;
 import org.bukkit.command.PluginCommand;
@@ -78,6 +79,7 @@ public final class VVotesPlugin extends JavaPlugin {
             messageService.reload();
             soundService.reload();
             databaseManager.initialize();
+            voteService.sealGoalsForCurrentDay();
             registerPlaceholderExpansion();
             startMonthlyDrawTask();
         } catch (Exception exception) {
@@ -151,8 +153,8 @@ public final class VVotesPlugin extends JavaPlugin {
         int everyMinutes = Math.max(1, configService.get().monthlyDrawAutoCheckMinutes());
         long periodTicks = everyMinutes * 60L * 20L;
         monthlyDrawTask = Bukkit.getScheduler().runTaskTimer(this, () -> {
-            VoteService.MonthlyDrawResult result = voteService.runAutoMonthlyDrawIfNeeded();
-            if (result.status() == VoteService.MonthlyDrawResult.Status.SUCCESS) {
+            MonthlyDrawResult result = voteService.runAutoMonthlyDrawIfNeeded();
+            if (result.status() == MonthlyDrawResult.Status.SUCCESS) {
                 getLogger().info("Sorteo mensual automatico ejecutado para " + result.monthKey() + ", ganador: " + result.winnerName());
             }
         }, 20L, periodTicks);
@@ -166,12 +168,8 @@ public final class VVotesPlugin extends JavaPlugin {
     }
 
     private void ensureYamlDefaults() {
-        // Main config.yml
-        getConfig().options().copyDefaults(true);
-        saveConfig();
+        mergeYamlDefaults("config.yml");
         reloadConfig();
-
-        // Extra yamls
         mergeYamlDefaults("messages.yml");
         mergeYamlDefaults("sound.yml");
     }

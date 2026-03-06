@@ -6,16 +6,14 @@ import com.valerinsmp.vvotes.config.PluginConfig;
 import com.valerinsmp.vvotes.db.DatabaseManager;
 import com.valerinsmp.vvotes.model.PlayerStats;
 import com.valerinsmp.vvotes.reward.CommandRewardExecutor;
+import net.kyori.adventure.title.Title;
 import org.bukkit.Bukkit;
 import org.bukkit.OfflinePlayer;
 import org.bukkit.entity.Player;
-import net.kyori.adventure.title.Title;
 
 import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.time.Instant;
+import java.time.Duration;
 import java.time.YearMonth;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
@@ -26,16 +24,24 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
-import java.time.Duration;
-import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.ConcurrentHashMap;
 
 public final class VoteService {
+
+    private static final long STATS_CACHE_TTL_MS = 5_000L;
+
     private final VVotesPlugin plugin;
     private final ConfigService configService;
     private final MessageService messageService;
     private final SoundService soundService;
-    private final DatabaseManager database;
+    private final VoteRepository repo;
     private final CommandRewardExecutor rewardExecutor;
+    final MonthlyDrawService monthlyDrawService;
+    private final Map<UUID, CachedStats> statsCache = new ConcurrentHashMap<>();
+
+    private record CachedStats(PlayerStats stats, double globalDaily, long expiresAt) {
+        boolean isExpired() { return System.currentTimeMillis() > expiresAt; }
+    }
 
     public VoteService(
             VVotesPlugin plugin,
@@ -49,262 +55,118 @@ public final class VoteService {
         this.configService = configService;
         this.messageService = messageService;
         this.soundService = soundService;
-        this.database = database;
+        this.repo = new VoteRepository(database);
         this.rewardExecutor = rewardExecutor;
+        this.monthlyDrawService = new MonthlyDrawService(plugin, configService, messageService, soundService, repo, rewardExecutor);
     }
+
+    // ── Public API ────────────────────────────────────────────────────────────
 
     public void handleVote(Player player, String serviceName) {
-        processVote(player.getUniqueId(), player.getName(), serviceName, 1.0, true);
+        UUID uuid = player.getUniqueId();
+        String name = player.getName();
+        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+            processVote(uuid, name, serviceName, 1.0, true);
+            statsCache.remove(uuid);
+        });
     }
 
-    public void handleOfflineVoteSkip(String playerName) {
-        messageService.send(Bukkit.getConsoleSender(), "vote-offline-skip", Map.of("player", playerName));
+    public void savePendingVote(String playerName, String serviceName) {
+        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+            try {
+                repo.insertPendingVote(repo.connection(), playerName, serviceName);
+                Bukkit.getScheduler().runTask(plugin, () ->
+                        messageService.send(Bukkit.getConsoleSender(), "vote-offline-pending", Map.of("player", playerName)));
+            } catch (SQLException exception) {
+                plugin.getLogger().warning("No se pudo guardar voto pendiente de " + playerName + ": " + exception.getMessage());
+            }
+        });
+    }
+
+    public void deliverPendingVotes(Player player) {
+        UUID uuid = player.getUniqueId();
+        String name = player.getName();
+        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+            try {
+                Connection connection = repo.connection();
+                List<VoteRepository.PendingVoteRow> pending = repo.fetchPendingVotes(connection, name);
+                for (VoteRepository.PendingVoteRow row : pending) {
+                    repo.deletePendingVote(connection, row.id());
+                    processVote(uuid, name, row.serviceName(), 1.0, true);
+                }
+                if (!pending.isEmpty()) statsCache.remove(uuid);
+            } catch (SQLException exception) {
+                plugin.getLogger().warning("Error entregando votos pendientes a " + name + ": " + exception.getMessage());
+            }
+        });
     }
 
     public void addManualVotes(OfflinePlayer target, int amount) {
-        if (amount <= 0 || target.getUniqueId() == null) {
-            return;
-        }
+        if (amount <= 0 || target.getUniqueId() == null) return;
         String name = target.getName() == null ? target.getUniqueId().toString() : target.getName();
         processVote(target.getUniqueId(), name, "manual", amount, false);
     }
 
     public MonthlyDrawResult runAutoMonthlyDrawIfNeeded() {
-        if (!configService.get().monthlyDrawEnabled()) {
-            return MonthlyDrawResult.disabled();
-        }
-        YearMonth month = YearMonth.now(ZoneId.of(configService.get().timezone())).minusMonths(1);
-        return drawMonthly(month.toString(), "auto");
+        return monthlyDrawService.runAutoIfNeeded();
     }
 
     public MonthlyDrawResult drawMonthly(String monthKey, String executedBy) {
-        if (!configService.get().monthlyDrawEnabled()) {
-            return MonthlyDrawResult.disabled();
-        }
-        if (monthKey == null || monthKey.isBlank()) {
-            monthKey = YearMonth.now(ZoneId.of(configService.get().timezone())).minusMonths(1).toString();
-        }
+        return monthlyDrawService.draw(monthKey, executedBy);
+    }
 
-        try {
-            YearMonth.parse(monthKey);
-        } catch (Exception exception) {
-            return MonthlyDrawResult.invalidMonth(monthKey);
-        }
+    public DrawHistoryResult getDrawHistory(String monthKey) {
+        return monthlyDrawService.getHistory(monthKey);
+    }
 
-        try (Connection connection = database.getConnection()) {
-            connection.setAutoCommit(false);
+    public List<TopMonthEntry> getTopMonth(String monthKey, int limit) {
+        return monthlyDrawService.getTopMonth(monthKey, limit);
+    }
+
+    public void invalidateStatsCache() {
+        statsCache.clear();
+    }
+
+    public void sealGoalsForCurrentDay() {
+        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
             try {
-                if (isMonthAlreadyDrawn(connection, monthKey)) {
-                    connection.rollback();
-                    return MonthlyDrawResult.alreadyDrawn(monthKey);
+                Connection connection = repo.connection();
+                DateContext context = currentContext();
+                double globalDaily = repo.readGlobalDailyVotes(connection, context.dayKey());
+                PluginConfig config = configService.get();
+
+                for (int threshold : config.globalDailyGoals().keySet()) {
+                    if (globalDaily >= threshold) {
+                        repo.tryClaimGlobalGoal(connection, "global_daily", threshold, context.dayKey());
+                    }
                 }
-
-                double maxVotes = fetchMaxVotesForMonth(connection, monthKey);
-                if (maxVotes < configService.get().monthlyDrawMinVotes()) {
-                    connection.rollback();
-                    return MonthlyDrawResult.noParticipants(monthKey, maxVotes);
+                if (config.globalRecurringStart() > 0 && config.globalRecurringEvery() > 0) {
+                    int start = config.globalRecurringStart() + config.globalRecurringEvery();
+                    for (int t = start; t <= (int) Math.floor(globalDaily); t += config.globalRecurringEvery()) {
+                        repo.tryClaimGlobalGoal(connection, "global_recurring_" + config.globalRecurringEvery(), t, context.dayKey());
+                    }
                 }
-
-                List<DrawCandidate> candidates = fetchCandidatesForTopVotes(connection, monthKey, maxVotes);
-                if (candidates.isEmpty()) {
-                    connection.rollback();
-                    return MonthlyDrawResult.noParticipants(monthKey, maxVotes);
-                }
-
-                DrawCandidate winner = candidates.get(ThreadLocalRandom.current().nextInt(candidates.size()));
-                String rewardCommand = configService.get().monthlyDrawRewardCommand();
-                Map<String, String> placeholders = new HashMap<>();
-                placeholders.put("player", winner.name());
-                placeholders.put("uuid", winner.uuid().toString());
-                placeholders.put("month", monthKey);
-                placeholders.put("votes", formatDouble(maxVotes));
-                placeholders.put("candidates", Integer.toString(candidates.size()));
-
-                rewardExecutor.execute(List.of(rewardCommand), placeholders);
-                insertMonthlyDrawHistory(connection, monthKey, winner, maxVotes, candidates.size(), executedBy, rewardCommand);
-                connection.commit();
-
-                for (var line : messageService.messages("draw-monthly-winner-broadcast", placeholders)) {
-                    Bukkit.broadcast(line);
-                }
-                soundService.playToAll("goal.completed");
-
-                return MonthlyDrawResult.success(monthKey, winner.name(), maxVotes, candidates.size());
             } catch (SQLException exception) {
-                connection.rollback();
-                throw exception;
+                plugin.getLogger().warning("Error sellando metas del dia: " + exception.getMessage());
             }
-        } catch (SQLException exception) {
-            plugin.getLogger().severe("Error en sorteo mensual: " + exception.getMessage());
-            return MonthlyDrawResult.error(monthKey, exception.getMessage());
-        }
+        });
     }
 
     public String getTimezoneId() {
         return configService.get().timezone();
     }
 
-    public List<TopMonthEntry> getTopMonth(String monthKey, int limit) {
-        if (monthKey == null || monthKey.isBlank()) {
-            monthKey = YearMonth.now(ZoneId.of(configService.get().timezone())).toString();
-        }
-        List<TopMonthEntry> entries = new ArrayList<>();
-        try (Connection connection = database.getConnection();
-             PreparedStatement statement = connection.prepareStatement(
-                     "SELECT player_name, votes FROM monthly_snapshots WHERE month_key = ? ORDER BY votes DESC LIMIT ?")) {
-            statement.setString(1, monthKey);
-            statement.setInt(2, limit);
-            try (ResultSet resultSet = statement.executeQuery()) {
-                int pos = 1;
-                while (resultSet.next()) {
-                    entries.add(new TopMonthEntry(pos++, resultSet.getString("player_name"), resultSet.getDouble("votes")));
-                }
-            }
-        } catch (SQLException exception) {
-            plugin.getLogger().warning("Error consultando top mensual: " + exception.getMessage());
-        }
-        return entries;
-    }
-
-    public record TopMonthEntry(int position, String playerName, double votes) {}
-
-    public DrawHistoryResult getDrawHistory(String monthKey) {
-        if (monthKey == null || monthKey.isBlank()) {
-            monthKey = YearMonth.now(ZoneId.of(configService.get().timezone())).minusMonths(1).toString();
-        }
-        try {
-            YearMonth.parse(monthKey);
-        } catch (Exception e) {
-            return DrawHistoryResult.invalidMonth(monthKey);
-        }
-        try (Connection connection = database.getConnection();
-             PreparedStatement statement = connection.prepareStatement(
-                     "SELECT winner_name, winner_uuid, top_votes, candidates_count, executed_by, executed_epoch FROM monthly_draw_history WHERE month_key = ?")) {
-            statement.setString(1, monthKey);
-            try (ResultSet resultSet = statement.executeQuery()) {
-                if (!resultSet.next()) {
-                    return DrawHistoryResult.notFound(monthKey);
-                }
-                return DrawHistoryResult.found(
-                        monthKey,
-                        resultSet.getString("winner_name"),
-                        resultSet.getString("winner_uuid"),
-                        resultSet.getDouble("top_votes"),
-                        resultSet.getInt("candidates_count"),
-                        resultSet.getString("executed_by"),
-                        resultSet.getLong("executed_epoch")
-                );
-            }
-        } catch (SQLException exception) {
-            plugin.getLogger().warning("Error consultando historial sorteo: " + exception.getMessage());
-            return DrawHistoryResult.error(monthKey, exception.getMessage());
-        }
-    }
-
-    public record DrawHistoryResult(Status status, String monthKey, String winnerName, String winnerUuid,
-                                    double topVotes, int candidatesCount, String executedBy, long executedEpoch, String error) {
-        public enum Status { FOUND, NOT_FOUND, INVALID_MONTH, ERROR }
-
-        public static DrawHistoryResult found(String monthKey, String winnerName, String winnerUuid,
-                                              double topVotes, int candidatesCount, String executedBy, long executedEpoch) {
-            return new DrawHistoryResult(Status.FOUND, monthKey, winnerName, winnerUuid, topVotes, candidatesCount, executedBy, executedEpoch, "");
-        }
-        public static DrawHistoryResult notFound(String monthKey) {
-            return new DrawHistoryResult(Status.NOT_FOUND, monthKey, "", "", 0, 0, "", 0, "");
-        }
-        public static DrawHistoryResult invalidMonth(String monthKey) {
-            return new DrawHistoryResult(Status.INVALID_MONTH, monthKey, "", "", 0, 0, "", 0, "");
-        }
-        public static DrawHistoryResult error(String monthKey, String error) {
-            return new DrawHistoryResult(Status.ERROR, monthKey, "", "", 0, 0, "", 0, error);
-        }
-    }
-
-    public void forceResetGlobalDaily() {
-        DateContext context = currentContext();
-        try (Connection connection = database.getConnection();
-             PreparedStatement statement = connection.prepareStatement("UPDATE global_stats SET daily_votes = 0, last_daily_reset = ? WHERE id = 1")) {
-            statement.setString(1, context.dayKey);
-            statement.executeUpdate();
-        } catch (SQLException exception) {
-            plugin.getLogger().warning("No se pudo reiniciar meta global diaria: " + exception.getMessage());
-        }
-    }
-
-    public double adjustGlobalDailyVotes(int delta) {
-        DateContext context = currentContext();
-        try (Connection connection = database.getConnection()) {
-            connection.setAutoCommit(false);
-            try {
-                GlobalState state = fetchGlobalState(connection, context);
-                double updated = Math.max(0, state.dailyVotes + delta);
-                updateGlobalState(connection, updated, context.dayKey);
-                connection.commit();
-                return updated;
-            } catch (SQLException exception) {
-                connection.rollback();
-                throw exception;
-            }
-        } catch (SQLException exception) {
-            plugin.getLogger().warning("No se pudo ajustar contador global diario: " + exception.getMessage());
-            return -1;
-        }
-    }
-
-    public void forceResetPlayerMonthly(OfflinePlayer target) {
-        if (target.getUniqueId() == null) {
-            return;
-        }
-        DateContext context = currentContext();
-        try (Connection connection = database.getConnection();
-             PreparedStatement statement = connection.prepareStatement(
-                     "UPDATE players SET monthly_votes = 0, last_month_key = ? WHERE uuid = ?")) {
-            statement.setString(1, context.monthKey);
-            statement.setString(2, target.getUniqueId().toString());
-            statement.executeUpdate();
-        } catch (SQLException exception) {
-            plugin.getLogger().warning("No se pudo reiniciar mensual de " + target.getName() + ": " + exception.getMessage());
-        }
-    }
-
-    public double adjustPlayerDailyVotes(OfflinePlayer target, int delta) {
-        if (target.getUniqueId() == null) {
-            return -1;
-        }
-        UUID uuid = target.getUniqueId();
-        String playerName = target.getName() == null ? uuid.toString() : target.getName();
-        DateContext context = currentContext();
-
-        try (Connection connection = database.getConnection()) {
-            connection.setAutoCommit(false);
-            try {
-                PlayerStats stats = normalizeForCurrentPeriod(connection, fetchOrCreateStats(connection, uuid, playerName), context);
-                double updatedDaily = Math.max(0, stats.dailyVotes() + delta);
-                try (PreparedStatement statement = connection.prepareStatement(
-                        "UPDATE players SET name = ?, daily_votes = ?, last_vote_day = ?, last_vote_epoch = ? WHERE uuid = ?")) {
-                    statement.setString(1, playerName);
-                    statement.setDouble(2, updatedDaily);
-                    statement.setString(3, context.dayKey);
-                    statement.setLong(4, context.epochSeconds);
-                    statement.setString(5, uuid.toString());
-                    statement.executeUpdate();
-                }
-                connection.commit();
-                return updatedDaily;
-            } catch (SQLException exception) {
-                connection.rollback();
-                throw exception;
-            }
-        } catch (SQLException exception) {
-            plugin.getLogger().warning("No se pudo ajustar contador diario de " + playerName + ": " + exception.getMessage());
-            return -1;
-        }
-    }
-
     public PlayerStats getStats(UUID uuid, String playerName) {
-        try (Connection connection = database.getConnection()) {
-            PlayerStats stats = fetchOrCreateStats(connection, uuid, playerName);
-            return normalizeForCurrentPeriod(connection, stats, currentContext());
+        CachedStats cached = statsCache.get(uuid);
+        if (cached != null && !cached.isExpired()) return cached.stats();
+        try {
+            Connection connection = repo.connection();
+            PlayerStats stats = repo.fetchOrCreateStats(connection, uuid, playerName);
+            DateContext context = currentContext();
+            PlayerStats normalized = normalizeForCurrentPeriod(connection, stats, context);
+            double globalDaily = repo.readGlobalDailyVotes(connection, context.dayKey());
+            statsCache.put(uuid, new CachedStats(normalized, globalDaily, System.currentTimeMillis() + STATS_CACHE_TTL_MS));
+            return normalized;
         } catch (SQLException exception) {
             plugin.getLogger().warning("Error obteniendo stats: " + exception.getMessage());
             return PlayerStats.empty(uuid, playerName);
@@ -312,19 +174,11 @@ public final class VoteService {
     }
 
     public double getGlobalDailyVotes() {
-        try (Connection connection = database.getConnection();
-             PreparedStatement statement = connection.prepareStatement("SELECT daily_votes, last_daily_reset FROM global_stats WHERE id = 1")) {
-            try (ResultSet resultSet = statement.executeQuery()) {
-                if (!resultSet.next()) {
-                    return 0;
-                }
-                String resetKey = resultSet.getString("last_daily_reset");
-                String dayKey = currentContext().dayKey;
-                if (!Objects.equals(resetKey, dayKey)) {
-                    return 0;
-                }
-                return resultSet.getDouble("daily_votes");
-            }
+        for (CachedStats cached : statsCache.values()) {
+            if (!cached.isExpired()) return cached.globalDaily();
+        }
+        try {
+            return repo.readGlobalDailyVotes(repo.connection(), currentContext().dayKey());
         } catch (SQLException exception) {
             plugin.getLogger().warning("Error leyendo votos globales: " + exception.getMessage());
             return 0;
@@ -333,53 +187,117 @@ public final class VoteService {
 
     public int nextGlobalGoal(double currentValue) {
         for (Integer threshold : configService.get().globalDailyGoals().keySet()) {
-            if (currentValue < threshold) {
-                return threshold;
-            }
+            if (currentValue < threshold) return threshold;
         }
         return -1;
     }
 
     public int nextMonthlyGoal(double currentValue) {
         for (Integer threshold : configService.get().playerMonthlyGoals().keySet()) {
-            if (currentValue < threshold) {
-                return threshold;
-            }
+            if (currentValue < threshold) return threshold;
         }
         return -1;
     }
 
     public String getDoubleSiteTodayIcon(UUID uuid) {
         PluginConfig config = configService.get();
-        if (!config.doubleSiteBonusEnabled()) {
-            return "";
-        }
-        if (uuid == null) {
-            return "";
-        }
+        if (!config.doubleSiteBonusEnabled() || uuid == null) return "";
         DateContext context = currentContext();
-        try (Connection connection = database.getConnection()) {
-            int distinctSites = countDistinctServicesToday(connection, uuid, context);
-            if (distinctSites >= config.doubleSiteBonusRequiredSites()) {
-                return config.doubleSiteTodayIcon();
-            }
+        try {
+            int distinctSites = repo.countDistinctServicesToday(repo.connection(), uuid, context);
+            if (distinctSites >= config.doubleSiteBonusRequiredSites()) return config.doubleSiteTodayIcon();
         } catch (SQLException exception) {
             plugin.getLogger().warning("Error leyendo placeholder double-site: " + exception.getMessage());
         }
         return "";
     }
 
-    public String formatDouble(double value) {
-        if (value == Math.floor(value)) {
-            return String.format(Locale.US, "%.0f", value);
+    public void forceResetGlobalDaily() {
+        DateContext context = currentContext();
+        try {
+            repo.updateGlobalState(repo.connection(), 0, context.dayKey());
+            invalidateStatsCache();
+        } catch (SQLException exception) {
+            plugin.getLogger().warning("No se pudo reiniciar meta global diaria: " + exception.getMessage());
         }
+    }
+
+    public double adjustGlobalDailyVotes(int delta) {
+        DateContext context = currentContext();
+        Connection connection = null;
+        try {
+            connection = repo.connection();
+            connection.setAutoCommit(false);
+            GlobalState state = repo.fetchGlobalState(connection, context);
+            double updated = Math.max(0, state.dailyVotes() + delta);
+            repo.updateGlobalState(connection, updated, context.dayKey());
+            connection.commit();
+            connection.setAutoCommit(true);
+            return updated;
+        } catch (SQLException exception) {
+            if (connection != null) {
+                try { connection.rollback(); connection.setAutoCommit(true); } catch (SQLException ignored) {}
+            }
+            plugin.getLogger().warning("No se pudo ajustar contador global diario: " + exception.getMessage());
+            return -1;
+        }
+    }
+
+    public void forceResetPlayerMonthly(OfflinePlayer target) {
+        if (target.getUniqueId() == null) return;
+        DateContext context = currentContext();
+        try {
+            Connection connection = repo.connection();
+            PlayerStats stats = repo.fetchOrCreateStats(connection, target.getUniqueId(),
+                    target.getName() == null ? target.getUniqueId().toString() : target.getName());
+            repo.updatePlayerStats(connection, target.getUniqueId(), stats.name(),
+                    stats.totalVotes(), stats.dailyVotes(), 0, stats.streakMonthly(),
+                    stats.lastVoteDay(), context.monthKey(), stats.lastVoteEpoch());
+            statsCache.remove(target.getUniqueId());
+        } catch (SQLException exception) {
+            plugin.getLogger().warning("No se pudo reiniciar mensual de " + target.getName() + ": " + exception.getMessage());
+        }
+    }
+
+    public double adjustPlayerDailyVotes(OfflinePlayer target, int delta) {
+        if (target.getUniqueId() == null) return -1;
+        UUID uuid = target.getUniqueId();
+        String playerName = target.getName() == null ? uuid.toString() : target.getName();
+        DateContext context = currentContext();
+        Connection connection = null;
+        try {
+            connection = repo.connection();
+            connection.setAutoCommit(false);
+            PlayerStats stats = normalizeForCurrentPeriod(connection, repo.fetchOrCreateStats(connection, uuid, playerName), context);
+            double updatedDaily = Math.max(0, stats.dailyVotes() + delta);
+            repo.updatePlayerStats(connection, uuid, playerName, stats.totalVotes(), updatedDaily,
+                    stats.monthlyVotes(), stats.streakMonthly(), context);
+            connection.commit();
+            connection.setAutoCommit(true);
+            statsCache.remove(uuid);
+            return updatedDaily;
+        } catch (SQLException exception) {
+            if (connection != null) {
+                try { connection.rollback(); connection.setAutoCommit(true); } catch (SQLException ignored) {}
+            }
+            plugin.getLogger().warning("No se pudo ajustar contador diario de " + playerName + ": " + exception.getMessage());
+            return -1;
+        }
+    }
+
+    public static String formatDoubleStatic(double value) {
+        if (value == Math.floor(value)) return String.format(Locale.US, "%.0f", value);
         return String.format(Locale.US, "%.2f", value);
     }
 
+    public String formatDouble(double value) {
+        return formatDoubleStatic(value);
+    }
+
+    // ── Core vote processing ──────────────────────────────────────────────────
+
     private void processVote(UUID uuid, String playerName, String serviceName, double amount, boolean executeVoteRewards) {
-        if (amount <= 0) {
-            return;
-        }
+        if (amount <= 0) return;
 
         PluginConfig config = configService.get();
         DateContext context = currentContext();
@@ -389,98 +307,110 @@ public final class VoteService {
         boolean playerGoalCompleted = false;
         boolean globalGoalCompleted = false;
         boolean doubleSiteBonusCompleted = false;
-        int highestMonthlyMilestoneTriggered = 0;
+        int highestMonthlyMilestone = 0;
 
-        try (Connection connection = database.getConnection()) {
+        try {
+            Connection connection = repo.connection();
             connection.setAutoCommit(false);
             try {
+                PlayerStats stats = normalizeForCurrentPeriod(connection, repo.fetchOrCreateStats(connection, uuid, playerName), context);
 
-                PlayerStats stats = normalizeForCurrentPeriod(connection, fetchOrCreateStats(connection, uuid, playerName), context);
-
-            long secondsSinceLast = stats.lastVoteEpoch() <= 0 ? Long.MAX_VALUE : context.epochSeconds - stats.lastVoteEpoch();
-            if (secondsSinceLast <= config.suspiciousWindowSeconds()) {
-                plugin.getLogger().warning("Voto sospechoso detectado: " + playerName + " servicio=" + serviceName + " diff=" + secondsSinceLast + "s");
-            }
-
-            int streakMonthly = computeMonthlyStreak(stats.streakMonthly(), stats.lastMonthKey(), context.monthKey);
-            double newTotal = stats.totalVotes() + amount;
-            double newDaily = stats.dailyVotes() + amount;
-            double newMonthly = stats.monthlyVotes() + amount;
-
-            updatePlayerStats(connection, uuid, playerName, newTotal, newDaily, newMonthly, streakMonthly, context);
-            upsertMonthlySnapshot(connection, uuid, playerName, context.monthKey, newMonthly, context.epochSeconds);
-
-            GlobalState globalState = fetchGlobalState(connection, context);
-            double previousGlobalDaily = globalState.dailyVotes;
-            double newGlobalDaily = globalState.dailyVotes + amount;
-            updateGlobalState(connection, newGlobalDaily, context.dayKey);
-
-            insertVoteLog(connection, uuid, playerName, serviceName, amount, amount);
-            fillPlaceholders(placeholders, uuid, playerName, serviceName, amount, newTotal, newDaily, newMonthly, streakMonthly, newGlobalDaily);
-
-            if (executeVoteRewards && config.doubleSiteBonusEnabled()) {
-                int distinctSitesToday = countDistinctServicesToday(connection, uuid, context);
-                placeholders.put("double_site_today_count", Integer.toString(distinctSitesToday));
-                if (distinctSitesToday >= config.doubleSiteBonusRequiredSites()
-                        && tryClaimPlayerGoal(connection, uuid, "double_site_daily", config.doubleSiteBonusRequiredSites(), context.dayKey)) {
-                    pendingCommands.add(config.doubleSiteBonusCommands());
-                    doubleSiteBonusCompleted = true;
+                long secondsSinceLast = stats.lastVoteEpoch() <= 0 ? Long.MAX_VALUE : context.epochSeconds() - stats.lastVoteEpoch();
+                if (secondsSinceLast <= config.suspiciousWindowSeconds()) {
+                    plugin.getLogger().warning("Voto sospechoso detectado: " + playerName + " servicio=" + serviceName + " diff=" + secondsSinceLast + "s");
                 }
-            }
 
-            if (executeVoteRewards) {
-                pendingCommands.add(config.voteRewards());
-            }
+                int streakMonthly = computeMonthlyStreak(stats.streakMonthly(), stats.lastMonthKey(), context.monthKey());
+                double newTotal = stats.totalVotes() + amount;
+                double newDaily = stats.dailyVotes() + amount;
+                double newMonthly = stats.monthlyVotes() + amount;
 
-            for (Map.Entry<Integer, List<String>> entry : config.monthlyStreakRewards().entrySet()) {
-                if (streakMonthly == entry.getKey()) {
-                    pendingCommands.add(entry.getValue());
-                }
-            }
+                repo.updatePlayerStats(connection, uuid, playerName, newTotal, newDaily, newMonthly, streakMonthly, context);
+                repo.upsertMonthlySnapshot(connection, uuid, playerName, context.monthKey(), newMonthly, context.epochSeconds());
 
-            for (Map.Entry<Integer, List<String>> entry : config.playerMonthlyGoals().entrySet()) {
-                if (newMonthly >= entry.getKey() && tryClaimPlayerGoal(connection, uuid, "monthly", entry.getKey(), context.monthKey)) {
-                    pendingCommands.add(entry.getValue());
-                    playerGoalCompleted = true;
-                    if (entry.getKey() > highestMonthlyMilestoneTriggered) {
-                        highestMonthlyMilestoneTriggered = entry.getKey();
+                GlobalState globalState = repo.fetchGlobalState(connection, context);
+                double previousGlobalDaily = globalState.dailyVotes();
+                double newGlobalDaily = globalState.dailyVotes() + amount;
+                repo.updateGlobalState(connection, newGlobalDaily, context.dayKey());
+
+                repo.insertVoteLog(connection, uuid, playerName, serviceName, amount, amount);
+                fillPlaceholders(placeholders, uuid, playerName, serviceName, amount, newTotal, newDaily, newMonthly, streakMonthly, newGlobalDaily);
+
+                if (executeVoteRewards && config.doubleSiteBonusEnabled()) {
+                    int distinctSites = repo.countDistinctServicesToday(connection, uuid, context);
+                    placeholders.put("double_site_today_count", Integer.toString(distinctSites));
+                    if (distinctSites >= config.doubleSiteBonusRequiredSites()
+                            && repo.tryClaimPlayerGoal(connection, uuid, "double_site_daily", config.doubleSiteBonusRequiredSites(), context.dayKey())) {
+                        pendingCommands.add(config.doubleSiteBonusCommands());
+                        doubleSiteBonusCompleted = true;
                     }
                 }
-            }
 
-            for (Map.Entry<Integer, List<String>> entry : config.globalDailyGoals().entrySet()) {
-                if (newGlobalDaily >= entry.getKey() && tryClaimGlobalGoal(connection, "global_daily", entry.getKey(), context.dayKey)) {
-                    pendingCommands.add(entry.getValue());
-                    globalGoalCompleted = true;
+                if (executeVoteRewards) pendingCommands.add(config.voteRewards());
+
+                for (Map.Entry<Integer, List<String>> entry : config.monthlyStreakRewards().entrySet()) {
+                    if (streakMonthly == entry.getKey()) pendingCommands.add(entry.getValue());
                 }
-            }
 
-            if (config.globalRecurringStart() > 0 && config.globalRecurringEvery() > 0 && !config.globalRecurringCommands().isEmpty()) {
-                int start = config.globalRecurringStart() + config.globalRecurringEvery();
-                int firstReached = Math.max(start, nextRecurringThreshold((int) Math.floor(previousGlobalDaily), config.globalRecurringEvery()));
-                int lastReached = (int) Math.floor(newGlobalDaily);
-                for (int threshold = firstReached; threshold <= lastReached; threshold += config.globalRecurringEvery()) {
-                    if (tryClaimGlobalGoal(connection, "global_recurring_" + config.globalRecurringEvery(), threshold, context.dayKey)) {
-                        recurringReached.add(threshold);
+                for (Map.Entry<Integer, List<String>> entry : config.playerMonthlyGoals().entrySet()) {
+                    if (newMonthly >= entry.getKey() && repo.tryClaimPlayerGoal(connection, uuid, "monthly", entry.getKey(), context.monthKey())) {
+                        pendingCommands.add(entry.getValue());
+                        playerGoalCompleted = true;
+                        if (entry.getKey() > highestMonthlyMilestone) highestMonthlyMilestone = entry.getKey();
+                    }
+                }
+
+                for (Map.Entry<Integer, List<String>> entry : config.globalDailyGoals().entrySet()) {
+                    if (newGlobalDaily >= entry.getKey() && repo.tryClaimGlobalGoal(connection, "global_daily", entry.getKey(), context.dayKey())) {
+                        pendingCommands.add(entry.getValue());
                         globalGoalCompleted = true;
                     }
                 }
-            }
 
-            connection.commit();
+                if (config.globalRecurringStart() > 0 && config.globalRecurringEvery() > 0 && !config.globalRecurringCommands().isEmpty()) {
+                    int start = config.globalRecurringStart() + config.globalRecurringEvery();
+                    int firstReached = Math.max(start, nextRecurringThreshold((int) Math.floor(previousGlobalDaily), config.globalRecurringEvery()));
+                    int lastReached = (int) Math.floor(newGlobalDaily);
+                    for (int threshold = firstReached; threshold <= lastReached; threshold += config.globalRecurringEvery()) {
+                        if (repo.tryClaimGlobalGoal(connection, "global_recurring_" + config.globalRecurringEvery(), threshold, context.dayKey())) {
+                            recurringReached.add(threshold);
+                            globalGoalCompleted = true;
+                        }
+                    }
+                }
 
-            if (highestMonthlyMilestoneTriggered > 0) {
-                placeholders.put("monthly_milestone", Integer.toString(highestMonthlyMilestoneTriggered));
-                placeholders.put("monthly_bonus", messageService.text("monthly-bonus-inline", placeholders));
-            } else {
-                placeholders.put("monthly_bonus", "");
+                connection.commit();
+                connection.setAutoCommit(true);
+            } catch (SQLException exception) {
+                connection.rollback();
+                connection.setAutoCommit(true);
+                throw exception;
             }
-            if (doubleSiteBonusCompleted) {
-                placeholders.put("double_site_bonus", messageService.text("double-site-bonus-inline", placeholders));
-            } else {
-                placeholders.put("double_site_bonus", "");
-            }
+        } catch (SQLException exception) {
+            plugin.getLogger().severe("Error procesando voto de " + playerName + ": " + exception.getMessage());
+            return;
+        }
 
+        if (highestMonthlyMilestone > 0) {
+            placeholders.put("monthly_milestone", Integer.toString(highestMonthlyMilestone));
+            placeholders.put("monthly_bonus", messageService.text("monthly-bonus-inline", placeholders));
+        } else {
+            placeholders.put("monthly_bonus", "");
+        }
+        placeholders.put("double_site_bonus", doubleSiteBonusCompleted
+                ? messageService.text("double-site-bonus-inline", placeholders) : "");
+
+        deliverNotificationsAndRewards(uuid, serviceName, config, placeholders,
+                pendingCommands, recurringReached, playerGoalCompleted, globalGoalCompleted, doubleSiteBonusCompleted);
+    }
+
+    private void deliverNotificationsAndRewards(
+            UUID uuid, String serviceName, PluginConfig config,
+            Map<String, String> placeholders, List<List<String>> pendingCommands,
+            List<Integer> recurringReached, boolean playerGoalCompleted,
+            boolean globalGoalCompleted, boolean doubleSiteBonusCompleted
+    ) {
+        Bukkit.getScheduler().runTask(plugin, () -> {
             if (config.broadcastOnVote()) {
                 for (var line : messageService.messages("vote-broadcast", placeholders)) {
                     Bukkit.broadcast(line);
@@ -492,9 +422,7 @@ public final class VoteService {
             if (player != null) {
                 soundService.play(player, "vote.announcement");
                 showTitle(player, "vote.title", "vote.subtitle", placeholders);
-                if (playerGoalCompleted) {
-                    soundService.play(player, "goal.completed");
-                }
+                if (playerGoalCompleted) soundService.play(player, "goal.completed");
                 if (doubleSiteBonusCompleted) {
                     String bonusMessage = config.doubleSiteBonusMessage();
                     if (bonusMessage != null && !bonusMessage.isBlank()) {
@@ -505,40 +433,50 @@ public final class VoteService {
                 runForcedServiceCommand(player, serviceName);
             }
 
-            if (globalGoalCompleted) {
-                soundService.playToAll("goal.completed");
-            }
+            if (globalGoalCompleted) soundService.playToAll("goal.completed");
 
             for (List<String> commands : pendingCommands) {
                 rewardExecutor.execute(commands, placeholders);
             }
-
-                for (Integer threshold : recurringReached) {
-                    Map<String, String> recurringPlaceholders = new HashMap<>(placeholders);
-                    recurringPlaceholders.put("goal", Integer.toString(threshold));
-                    rewardExecutor.execute(config.globalRecurringCommands(), recurringPlaceholders);
-                }
-            } catch (SQLException exception) {
-                connection.rollback();
-                throw exception;
+            for (Integer threshold : recurringReached) {
+                Map<String, String> rp = new HashMap<>(placeholders);
+                rp.put("goal", Integer.toString(threshold));
+                rewardExecutor.execute(config.globalRecurringCommands(), rp);
             }
-        } catch (SQLException exception) {
-            plugin.getLogger().severe("Error procesando voto de " + playerName + ": " + exception.getMessage());
-        }
+        });
     }
 
-    private void fillPlaceholders(
-            Map<String, String> placeholders,
-            UUID uuid,
-            String playerName,
-            String serviceName,
-            double amount,
-            double total,
-            double daily,
-            double monthly,
-            int streakMonthly,
-            double globalDaily
-    ) {
+    // ── Stats normalization ───────────────────────────────────────────────────
+
+    private PlayerStats normalizeForCurrentPeriod(Connection connection, PlayerStats stats, DateContext context) throws SQLException {
+        double dailyVotes = stats.dailyVotes();
+        double monthlyVotes = stats.monthlyVotes();
+        boolean changed = false;
+
+        if (!Objects.equals(stats.lastVoteDay(), context.dayKey())) { dailyVotes = 0; changed = true; }
+        if (!Objects.equals(stats.lastMonthKey(), context.monthKey())) { monthlyVotes = 0; changed = true; }
+
+        if (!changed) return stats;
+
+        repo.updatePlayerStats(connection, stats.uuid(), stats.name(), stats.totalVotes(), dailyVotes,
+                monthlyVotes, stats.streakMonthly(), stats.lastVoteDay(), stats.lastMonthKey(), stats.lastVoteEpoch());
+
+        return new PlayerStats(stats.uuid(), stats.name(), stats.totalVotes(), dailyVotes, monthlyVotes,
+                stats.streakMonthly(), stats.lastVoteDay(), stats.lastMonthKey(), stats.lastVoteEpoch());
+    }
+
+    private int computeMonthlyStreak(int previousStreak, String previousMonth, String currentMonth) {
+        if (previousMonth == null || previousMonth.isBlank()) return 1;
+        if (Objects.equals(previousMonth, currentMonth)) return previousStreak;
+        YearMonth expectedPrevious = YearMonth.parse(currentMonth).minusMonths(1);
+        return Objects.equals(previousMonth, expectedPrevious.toString()) ? previousStreak + 1 : 1;
+    }
+
+    // ── Placeholders ──────────────────────────────────────────────────────────
+
+    private void fillPlaceholders(Map<String, String> placeholders, UUID uuid, String playerName,
+                                   String serviceName, double amount, double total, double daily,
+                                   double monthly, int streakMonthly, double globalDaily) {
         placeholders.put("player", playerName);
         placeholders.put("uuid", uuid.toString());
         placeholders.put("service", serviceName);
@@ -553,369 +491,47 @@ public final class VoteService {
         placeholders.put("daily_global", formatDouble(globalDaily));
     }
 
-    private PlayerStats normalizeForCurrentPeriod(Connection connection, PlayerStats stats, DateContext context) throws SQLException {
-        boolean changed = false;
-        double dailyVotes = stats.dailyVotes();
-        double monthlyVotes = stats.monthlyVotes();
+    // ── Utils ─────────────────────────────────────────────────────────────────
 
-        if (!Objects.equals(stats.lastVoteDay(), context.dayKey)) {
-            dailyVotes = 0;
-            changed = true;
-        }
-
-        if (!Objects.equals(stats.lastMonthKey(), context.monthKey)) {
-            monthlyVotes = 0;
-            changed = true;
-        }
-
-        if (!changed) {
-            return stats;
-        }
-
-        updatePlayerStats(
-                connection,
-                stats.uuid(),
-                stats.name(),
-                stats.totalVotes(),
-                dailyVotes,
-                monthlyVotes,
-                stats.streakMonthly(),
-                stats.lastVoteDay(),
-                stats.lastMonthKey(),
-                stats.lastVoteEpoch()
-        );
-
-        return new PlayerStats(
-                stats.uuid(),
-                stats.name(),
-                stats.totalVotes(),
-                dailyVotes,
-                monthlyVotes,
-                stats.streakMonthly(),
-                stats.lastVoteDay(),
-                stats.lastMonthKey(),
-                stats.lastVoteEpoch()
-        );
-    }
-
-    private int computeMonthlyStreak(int previousStreak, String previousMonth, String currentMonth) {
-        if (previousMonth == null || previousMonth.isBlank()) {
-            return 1;
-        }
-        if (Objects.equals(previousMonth, currentMonth)) {
-            return previousStreak;
-        }
-        YearMonth expectedPrevious = YearMonth.parse(currentMonth).minusMonths(1);
-        if (Objects.equals(previousMonth, expectedPrevious.toString())) {
-            return previousStreak + 1;
-        }
-        return 1;
-    }
-
-    private PlayerStats fetchOrCreateStats(Connection connection, UUID uuid, String name) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement("SELECT * FROM players WHERE uuid = ?")) {
-            statement.setString(1, uuid.toString());
-            try (ResultSet resultSet = statement.executeQuery()) {
-                if (resultSet.next()) {
-                    return new PlayerStats(
-                            uuid,
-                            resultSet.getString("name"),
-                            resultSet.getDouble("total_votes"),
-                            resultSet.getDouble("daily_votes"),
-                            resultSet.getDouble("monthly_votes"),
-                            resultSet.getInt("streak_monthly"),
-                            resultSet.getString("last_vote_day"),
-                            resultSet.getString("last_month_key"),
-                            resultSet.getLong("last_vote_epoch")
-                    );
-                }
-            }
-        }
-
-        try (PreparedStatement statement = connection.prepareStatement("INSERT OR IGNORE INTO players(uuid, name) VALUES (?, ?)")) {
-            statement.setString(1, uuid.toString());
-            statement.setString(2, name);
-            statement.executeUpdate();
-        }
-
-        try (PreparedStatement statement = connection.prepareStatement("SELECT * FROM players WHERE uuid = ?")) {
-            statement.setString(1, uuid.toString());
-            try (ResultSet resultSet = statement.executeQuery()) {
-                if (resultSet.next()) {
-                    return new PlayerStats(
-                            uuid,
-                            resultSet.getString("name"),
-                            resultSet.getDouble("total_votes"),
-                            resultSet.getDouble("daily_votes"),
-                            resultSet.getDouble("monthly_votes"),
-                            resultSet.getInt("streak_monthly"),
-                            resultSet.getString("last_vote_day"),
-                            resultSet.getString("last_month_key"),
-                            resultSet.getLong("last_vote_epoch")
-                    );
-                }
-            }
-        }
-
-        return PlayerStats.empty(uuid, name);
-    }
-
-    private void updatePlayerStats(
-            Connection connection,
-            UUID uuid,
-            String name,
-            double total,
-            double daily,
-            double monthly,
-            int streakMonthly,
-            DateContext context
-    ) throws SQLException {
-        updatePlayerStats(connection, uuid, name, total, daily, monthly, streakMonthly,
-                context.dayKey, context.monthKey, context.epochSeconds);
-    }
-
-    private void updatePlayerStats(
-            Connection connection,
-            UUID uuid,
-            String name,
-            double total,
-            double daily,
-            double monthly,
-            int streakMonthly,
-            String lastVoteDay,
-            String monthKey,
-            long epoch
-    ) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement("""
-                UPDATE players
-                SET name = ?, total_votes = ?, daily_votes = ?, monthly_votes = ?,
-                    streak_monthly = ?, last_vote_day = ?, last_month_key = ?, last_vote_epoch = ?
-                WHERE uuid = ?
-                """)) {
-            statement.setString(1, name);
-            statement.setDouble(2, total);
-            statement.setDouble(3, daily);
-            statement.setDouble(4, monthly);
-            statement.setInt(5, streakMonthly);
-            statement.setString(6, lastVoteDay);
-            statement.setString(7, monthKey);
-            statement.setLong(8, epoch);
-            statement.setString(9, uuid.toString());
-            statement.executeUpdate();
-        }
-    }
-
-    private GlobalState fetchGlobalState(Connection connection, DateContext context) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement("SELECT daily_votes, last_daily_reset FROM global_stats WHERE id = 1")) {
-            try (ResultSet resultSet = statement.executeQuery()) {
-                if (!resultSet.next()) {
-                    return new GlobalState(0, context.dayKey);
-                }
-                String reset = resultSet.getString("last_daily_reset");
-                if (!Objects.equals(reset, context.dayKey)) {
-                    return new GlobalState(0, context.dayKey);
-                }
-                return new GlobalState(resultSet.getDouble("daily_votes"), reset);
-            }
-        }
-    }
-
-    private void updateGlobalState(Connection connection, double dailyVotes, String dayKey) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement(
-                "UPDATE global_stats SET daily_votes = ?, last_daily_reset = ? WHERE id = 1")) {
-            statement.setDouble(1, dailyVotes);
-            statement.setString(2, dayKey);
-            statement.executeUpdate();
-        }
-    }
-
-    private boolean tryClaimGlobalGoal(Connection connection, String type, int value, String dayKey) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement(
-                "INSERT OR IGNORE INTO goal_claims_global(goal_type, goal_value, day_key) VALUES (?, ?, ?)")) {
-            statement.setString(1, type);
-            statement.setInt(2, value);
-            statement.setString(3, dayKey);
-            return statement.executeUpdate() > 0;
-        }
-    }
-
-    private boolean tryClaimPlayerGoal(Connection connection, UUID uuid, String type, int value, String period) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement(
-                "INSERT OR IGNORE INTO goal_claims_player(uuid, goal_type, goal_value, period_key) VALUES (?, ?, ?, ?)")) {
-            statement.setString(1, uuid.toString());
-            statement.setString(2, type);
-            statement.setInt(3, value);
-            statement.setString(4, period);
-            return statement.executeUpdate() > 0;
-        }
-    }
-
-    private void insertVoteLog(Connection connection, UUID uuid, String playerName, String service, double amount, double multiplier) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement(
-                "INSERT INTO vote_logs(uuid, player_name, service_name, amount, multiplier, created_epoch) VALUES (?, ?, ?, ?, ?, ?)")) {
-            statement.setString(1, uuid.toString());
-            statement.setString(2, playerName);
-            statement.setString(3, service);
-            statement.setDouble(4, amount);
-            statement.setDouble(5, multiplier);
-            statement.setLong(6, Instant.now().getEpochSecond());
-            statement.executeUpdate();
-        }
-    }
-
-    private int countDistinctServicesToday(Connection connection, UUID uuid, DateContext context) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement("""
-                SELECT COUNT(DISTINCT LOWER(service_name)) AS total
-                FROM vote_logs
-                WHERE uuid = ?
-                  AND created_epoch >= ?
-                  AND created_epoch < ?
-                  AND LOWER(service_name) <> 'manual'
-                """)) {
-            statement.setString(1, uuid.toString());
-            statement.setLong(2, context.dayStartEpoch);
-            statement.setLong(3, context.nextDayEpoch);
-            try (ResultSet resultSet = statement.executeQuery()) {
-                if (resultSet.next()) {
-                    return resultSet.getInt("total");
-                }
-            }
-        }
-        return 0;
-    }
-
-    private void upsertMonthlySnapshot(Connection connection, UUID uuid, String playerName, String monthKey, double votes, long epoch) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement("""
-                INSERT INTO monthly_snapshots(uuid, player_name, month_key, votes, last_update_epoch)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(uuid, month_key) DO UPDATE SET
-                    player_name = excluded.player_name,
-                    votes = excluded.votes,
-                    last_update_epoch = excluded.last_update_epoch
-                """)) {
-            statement.setString(1, uuid.toString());
-            statement.setString(2, playerName);
-            statement.setString(3, monthKey);
-            statement.setDouble(4, votes);
-            statement.setLong(5, epoch);
-            statement.executeUpdate();
-        }
-    }
-
-    private boolean isMonthAlreadyDrawn(Connection connection, String monthKey) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement(
-                "SELECT 1 FROM monthly_draw_history WHERE month_key = ?")) {
-            statement.setString(1, monthKey);
-            try (ResultSet resultSet = statement.executeQuery()) {
-                return resultSet.next();
-            }
-        }
-    }
-
-    private double fetchMaxVotesForMonth(Connection connection, String monthKey) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement(
-                "SELECT COALESCE(MAX(votes), 0) AS max_votes FROM monthly_snapshots WHERE month_key = ?")) {
-            statement.setString(1, monthKey);
-            try (ResultSet resultSet = statement.executeQuery()) {
-                if (resultSet.next()) {
-                    return resultSet.getDouble("max_votes");
-                }
-                return 0;
-            }
-        }
-    }
-
-    private List<DrawCandidate> fetchCandidatesForTopVotes(Connection connection, String monthKey, double maxVotes) throws SQLException {
-        List<DrawCandidate> candidates = new ArrayList<>();
-        try (PreparedStatement statement = connection.prepareStatement("""
-                SELECT uuid, player_name
-                FROM monthly_snapshots
-                WHERE month_key = ? AND votes = ?
-                ORDER BY player_name ASC
-                """)) {
-            statement.setString(1, monthKey);
-            statement.setDouble(2, maxVotes);
-            try (ResultSet resultSet = statement.executeQuery()) {
-                while (resultSet.next()) {
-                    candidates.add(new DrawCandidate(
-                            UUID.fromString(resultSet.getString("uuid")),
-                            resultSet.getString("player_name")
-                    ));
-                }
-            }
-        }
-        return candidates;
-    }
-
-    private void insertMonthlyDrawHistory(
-            Connection connection,
-            String monthKey,
-            DrawCandidate winner,
-            double topVotes,
-            int candidatesCount,
-            String executedBy,
-            String rewardCommand
-    ) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement("""
-                INSERT INTO monthly_draw_history(month_key, winner_uuid, winner_name, top_votes, candidates_count, executed_by, executed_epoch, reward_command)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """)) {
-            statement.setString(1, monthKey);
-            statement.setString(2, winner.uuid().toString());
-            statement.setString(3, winner.name());
-            statement.setDouble(4, topVotes);
-            statement.setInt(5, candidatesCount);
-            statement.setString(6, executedBy);
-            statement.setLong(7, Instant.now().getEpochSecond());
-            statement.setString(8, rewardCommand);
-            statement.executeUpdate();
-        }
-    }
-
-    private DateContext currentContext() {
+    DateContext currentContext() {
         ZoneId zoneId = ZoneId.of(configService.get().timezone());
         ZonedDateTime now = ZonedDateTime.now(zoneId);
         ZonedDateTime dayStart = now.toLocalDate().atStartOfDay(zoneId);
-        ZonedDateTime nextDayStart = dayStart.plusDays(1);
-        String dayKey = now.toLocalDate().toString();
-        String monthKey = YearMonth.from(now).toString();
-        return new DateContext(dayKey, monthKey, now.toEpochSecond(), dayStart.toEpochSecond(), nextDayStart.toEpochSecond());
-    }
-
-    private void runForcedServiceCommand(Player player, String serviceName) {
-        List<String> commands = configService.get().forcedServiceCommands(serviceName);
-        if (commands.isEmpty()) {
-            plugin.getLogger().warning("No hay comandos forzados configurados para servicio de voto: " + serviceName);
-            return;
-        }
-        Bukkit.getScheduler().runTask(plugin, () -> {
-            if (!player.isOnline()) {
-                return;
-            }
-            for (String raw : commands) {
-                String command = raw.startsWith("/") ? raw.substring(1) : raw;
-                try {
-                    // Ejecuta el comando con el jugador como sender.
-                    boolean ok = Bukkit.dispatchCommand(player, command);
-                    if (ok) {
-                        plugin.getLogger().info("Comando forzado por voto ejecutado para " + player.getName() + " (" + serviceName + "): /" + command);
-                        return;
-                    }
-                    // Fallback por si el plugin depende de preprocess/chat.
-                    player.chat("/" + command);
-                    plugin.getLogger().info("Comando forzado por voto fallback chat para " + player.getName() + " (" + serviceName + "): /" + command);
-                    return;
-                } catch (Exception exception) {
-                    plugin.getLogger().warning("Fallo comando forzado por voto para " + player.getName() + " (" + serviceName + "): /" + command + " -> " + exception.getMessage());
-                }
-            }
-            plugin.getLogger().warning("No se pudo ejecutar ningun comando forzado para " + player.getName() + " en servicio " + serviceName + ": " + String.join(", ", commands));
-        });
+        return new DateContext(
+                now.toLocalDate().toString(),
+                java.time.YearMonth.from(now).toString(),
+                now.toEpochSecond(),
+                dayStart.toEpochSecond(),
+                dayStart.plusDays(1).toEpochSecond()
+        );
     }
 
     private int nextRecurringThreshold(int value, int step) {
         int mod = value % step;
         return mod == 0 ? value + step : value + (step - mod);
+    }
+
+    private void runForcedServiceCommand(Player player, String serviceName) {
+        List<String> commands = configService.get().forcedServiceCommands(serviceName);
+        if (commands.isEmpty()) return;
+        Bukkit.getScheduler().runTask(plugin, () -> {
+            if (!player.isOnline()) return;
+            for (String raw : commands) {
+                String command = raw.startsWith("/") ? raw.substring(1) : raw;
+                try {
+                    if (Bukkit.dispatchCommand(player, command)) {
+                        plugin.getLogger().info("Comando forzado ejecutado para " + player.getName() + " (" + serviceName + "): /" + command);
+                        return;
+                    }
+                    player.chat("/" + command);
+                    plugin.getLogger().info("Comando forzado fallback chat para " + player.getName() + " (" + serviceName + "): /" + command);
+                    return;
+                } catch (Exception exception) {
+                    plugin.getLogger().warning("Fallo comando forzado para " + player.getName() + " (" + serviceName + "): /" + command + " -> " + exception.getMessage());
+                }
+            }
+            plugin.getLogger().warning("No se pudo ejecutar ningun comando forzado para " + player.getName() + " en servicio " + serviceName + ": " + String.join(", ", commands));
+        });
     }
 
     private void showTitle(Player player, String titleKey, String subtitleKey, Map<String, String> placeholders) {
@@ -925,49 +541,5 @@ public final class VoteService {
                 Title.Times.times(Duration.ofMillis(200), Duration.ofMillis(2000), Duration.ofMillis(400))
         );
         player.showTitle(title);
-    }
-
-    private record DateContext(String dayKey, String monthKey, long epochSeconds, long dayStartEpoch, long nextDayEpoch) {
-    }
-
-    private record GlobalState(double dailyVotes, String dayKey) {
-    }
-
-    private record DrawCandidate(UUID uuid, String name) {
-    }
-
-    public record MonthlyDrawResult(Status status, String monthKey, String winnerName, double topVotes, int candidatesCount, String error) {
-        public enum Status {
-            SUCCESS,
-            NO_PARTICIPANTS,
-            ALREADY_DRAWN,
-            DISABLED,
-            INVALID_MONTH,
-            ERROR
-        }
-
-        public static MonthlyDrawResult success(String monthKey, String winnerName, double topVotes, int candidatesCount) {
-            return new MonthlyDrawResult(Status.SUCCESS, monthKey, winnerName, topVotes, candidatesCount, "");
-        }
-
-        public static MonthlyDrawResult noParticipants(String monthKey, double topVotes) {
-            return new MonthlyDrawResult(Status.NO_PARTICIPANTS, monthKey, "", topVotes, 0, "");
-        }
-
-        public static MonthlyDrawResult alreadyDrawn(String monthKey) {
-            return new MonthlyDrawResult(Status.ALREADY_DRAWN, monthKey, "", 0, 0, "");
-        }
-
-        public static MonthlyDrawResult disabled() {
-            return new MonthlyDrawResult(Status.DISABLED, "", "", 0, 0, "");
-        }
-
-        public static MonthlyDrawResult invalidMonth(String monthKey) {
-            return new MonthlyDrawResult(Status.INVALID_MONTH, monthKey, "", 0, 0, "");
-        }
-
-        public static MonthlyDrawResult error(String monthKey, String error) {
-            return new MonthlyDrawResult(Status.ERROR, monthKey, "", 0, 0, error);
-        }
     }
 }
