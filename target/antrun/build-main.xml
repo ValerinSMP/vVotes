@@ -2,6 +2,6 @@
 <project name="maven-antrun-" default="main">
   <target name="main">
     <mkdir dir="C:/Users/marti/Desktop/plugins-v/plugins" />
-    <copy file="C:\Users\Mtynnn\Documents\GitHub\vVotes\target/vVotes-1.0.0.jar" todir="C:/Users/marti/Desktop/plugins-v/plugins" overwrite="true" />
+    <copy file="C:\Users\marti\Documents\GitHub\vVotes\target/vVotes-1.0.0.jar" todir="C:/Users/marti/Desktop/plugins-v/plugins" overwrite="true" />
   </target>
 </project>
