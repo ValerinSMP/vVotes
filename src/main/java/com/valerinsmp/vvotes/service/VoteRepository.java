@@ -334,6 +334,40 @@ final class VoteRepository {
         }
     }
 
+    // ── Player preferences ───────────────────────────────────────────────────
+
+    boolean isVoteAnnouncementMuted(Connection connection, UUID uuid) throws SQLException {
+        ensurePlayerPreferencesRow(connection, uuid);
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT mute_vote_announcements FROM player_preferences WHERE uuid = ?")) {
+            statement.setString(1, uuid.toString());
+            try (ResultSet rs = statement.executeQuery()) {
+                if (rs.next()) {
+                    return rs.getInt("mute_vote_announcements") == 1;
+                }
+            }
+        }
+        return false;
+    }
+
+    void setVoteAnnouncementMuted(Connection connection, UUID uuid, boolean muted) throws SQLException {
+        ensurePlayerPreferencesRow(connection, uuid);
+        try (PreparedStatement statement = connection.prepareStatement(
+                "UPDATE player_preferences SET mute_vote_announcements = ? WHERE uuid = ?")) {
+            statement.setInt(1, muted ? 1 : 0);
+            statement.setString(2, uuid.toString());
+            statement.executeUpdate();
+        }
+    }
+
+    private void ensurePlayerPreferencesRow(Connection connection, UUID uuid) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(
+                "INSERT OR IGNORE INTO player_preferences(uuid, mute_vote_announcements) VALUES (?, 0)")) {
+            statement.setString(1, uuid.toString());
+            statement.executeUpdate();
+        }
+    }
+
     // ── Inner types ──────────────────────────────────────────────────────────
 
     record PendingVoteRow(long id, String serviceName) {}

@@ -13,6 +13,10 @@ commands:
     description: Muestra tus estadisticas de votos.
     usage: /votestats
     permission: vvotes.use
+  vvotes:
+    description: Configuracion personal de anuncios de votos.
+    usage: /vvotes toggle
+    permission: vvotes.use
   voteadmin:
     description: Administracion de vVotes.
     usage: /voteadmin <reload|add|resetdaily|resetmonthly|adddaily|removedaily|addglobaldaily|removeglobaldaily|drawmonthly>

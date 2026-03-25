@@ -30,6 +30,9 @@ messages:
   usage-voteadmin-removedaily: '%prefix%Uso: /voteadmin removedaily <jugador> <cantidad>'
   usage-voteadmin-addglobaldaily: '%prefix%Uso: /voteadmin addglobaldaily <cantidad>'
   usage-voteadmin-removeglobaldaily: '%prefix%Uso: /voteadmin removeglobaldaily <cantidad>'
+  usage-vvotes: '%prefix%Uso: /vvotes toggle'
+  vvotes-toggle-on: '%prefix%Activaste los anuncios de voto globales (mensaje y sonido).'
+  vvotes-toggle-off: '%prefix%Silenciaste los anuncios de voto globales (mensaje y sonido).'
   admin-adddaily-ok: '%prefix%Se agregaron &#6EE7B7%amount% &fvotos diarios a &#6EE7B7%player%&f. Diario actual: &#34D399%daily%'
   admin-removedaily-ok: '%prefix%Se quitaron &#6EE7B7%amount% &fvotos diarios a &#6EE7B7%player%&f. Diario actual: &#34D399%daily%'
   admin-addglobaldaily-ok: '%prefix%Se agregaron &#6EE7B7%amount% &fvotos al contador global diario. Global actual: &#34D399%daily_global%'
@@ -41,6 +44,7 @@ messages:
   - '%prefix%&#6EE7B7Comandos de votos'
   - '%prefix%&#34D399/vote &8- &fMuestra esta ayuda.'
   - '%prefix%&#34D399/votestats &8- &fMuestra tus estadisticas de votos.'
+  - '%prefix%&#34D399/vvotes toggle &8- &fActiva o silencia anuncios globales de votos.'
   - ''
   admin-drawmonthly-success: '%prefix%Sorteo de &#6EE7B7%month% &frealizado. Ganador: &#34D399%winner% &8| &fVotos top: &#34D399%votes% &8| &fEmpatados: &#34D399%candidates%'
   admin-drawmonthly-no-participants: '%prefix%No hay participantes validos para &#6EE7B7%month% &8(minimo actual/top: &#34D399%votes%&8).'
@@ -67,6 +71,15 @@ messages:
   - ''
   - '%prefix%&#34D399%player% &fha votado por el servidor y ha recibido sus recompensas, apoyanos con &#22C55E/vote%monthly_bonus%%double_site_bonus%'
   - ''
+  global-goal-completed-broadcast:
+  - ''
+  - '%prefix%&#10B981Meta global completada: &#6EE7B7%goal% &fvotos del dia. Recompensas entregadas.'
+  - ''
+  global-recurring-goal-completed-broadcast:
+  - ''
+  - '%prefix%&#22C55EMeta recurrente global completada: &#6EE7B7%goal% &fvotos. Recompensas entregadas.'
+  - ''
+  player-monthly-goal-completed: '%prefix%&#22C55ECompletaste la meta mensual de &#6EE7B7%goal% &fvotos. Recompensas aplicadas.'
   draw-monthly-winner-broadcast:
   - ''
   - '%prefix%Sorteo mensual &#6EE7B7%month% &fcompletado.'

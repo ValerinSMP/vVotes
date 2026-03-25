@@ -44,6 +44,7 @@ public final class VVotesExpansion extends PlaceholderExpansion {
         }
 
         PlayerStats stats = voteService.getStats(player.getUniqueId(), player.getName());
+        boolean muted = voteService.isVoteAnnouncementMuted(player.getUniqueId(), player.getName());
         return switch (params.toLowerCase()) {
             case "total", "votes_total" -> voteService.formatDouble(stats.totalVotes());
             case "daily", "votes_daily" -> voteService.formatDouble(stats.dailyVotes());
@@ -54,6 +55,8 @@ public final class VVotesExpansion extends PlaceholderExpansion {
             case "next_global_goal" -> Integer.toString(voteService.nextGlobalGoal(voteService.getGlobalDailyVotes()));
             case "next_monthly_goal" -> Integer.toString(voteService.nextMonthlyGoal(stats.monthlyVotes()));
             case "double_site_today_icon", "voted_two_sites_today_icon" -> voteService.getDoubleSiteTodayIcon(player.getUniqueId());
+            case "vote_announcements_enabled", "announcements_enabled" -> muted ? "false" : "true";
+            case "vote_announcements_state", "announcements_state" -> muted ? "OFF" : "ON";
             default -> null;
         };
     }

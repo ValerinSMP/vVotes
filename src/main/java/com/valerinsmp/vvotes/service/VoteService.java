@@ -38,6 +38,7 @@ public final class VoteService {
     private final CommandRewardExecutor rewardExecutor;
     final MonthlyDrawService monthlyDrawService;
     private final Map<UUID, CachedStats> statsCache = new ConcurrentHashMap<>();
+    private final Map<UUID, Boolean> voteAnnouncementMuteCache = new ConcurrentHashMap<>();
 
     private record CachedStats(PlayerStats stats, double globalDaily, long expiresAt) {
         boolean isExpired() { return System.currentTimeMillis() > expiresAt; }
@@ -95,6 +96,46 @@ public final class VoteService {
 
     public void invalidateStatsCache() {
         statsCache.clear();
+    }
+
+    public boolean toggleVoteAnnouncements(UUID uuid, String playerName) {
+        if (uuid == null) {
+            return false;
+        }
+        String safeName = (playerName == null || playerName.isBlank()) ? uuid.toString() : playerName;
+        try {
+            Connection connection = repo.connection();
+            repo.fetchOrCreateStats(connection, uuid, safeName);
+            boolean currentlyMuted = repo.isVoteAnnouncementMuted(connection, uuid);
+            boolean updated = !currentlyMuted;
+            repo.setVoteAnnouncementMuted(connection, uuid, updated);
+            voteAnnouncementMuteCache.put(uuid, updated);
+            return updated;
+        } catch (SQLException exception) {
+            plugin.getLogger().warning("No se pudo cambiar la preferencia de anuncios de voto para " + safeName + ": " + exception.getMessage());
+            return false;
+        }
+    }
+
+    public boolean isVoteAnnouncementMuted(UUID uuid, String playerName) {
+        if (uuid == null) {
+            return false;
+        }
+        Boolean cached = voteAnnouncementMuteCache.get(uuid);
+        if (cached != null) {
+            return cached;
+        }
+        String safeName = (playerName == null || playerName.isBlank()) ? uuid.toString() : playerName;
+        try {
+            Connection connection = repo.connection();
+            repo.fetchOrCreateStats(connection, uuid, safeName);
+            boolean muted = repo.isVoteAnnouncementMuted(connection, uuid);
+            voteAnnouncementMuteCache.put(uuid, muted);
+            return muted;
+        } catch (SQLException exception) {
+            plugin.getLogger().warning("No se pudo leer la preferencia de anuncios de voto para " + safeName + ": " + exception.getMessage());
+            return false;
+        }
     }
 
     public void sealGoalsForCurrentDay() {
@@ -273,6 +314,8 @@ public final class VoteService {
         DateContext context = currentContext();
         List<List<String>> pendingCommands = new ArrayList<>();
         List<Integer> recurringReached = new ArrayList<>();
+        List<Integer> globalDailyReached = new ArrayList<>();
+        List<Integer> monthlyGoalsReached = new ArrayList<>();
         Map<String, String> placeholders = new HashMap<>();
         boolean playerGoalCompleted = false;
         boolean globalGoalCompleted = false;
@@ -325,6 +368,7 @@ public final class VoteService {
                 for (Map.Entry<Integer, List<String>> entry : config.playerMonthlyGoals().entrySet()) {
                     if (newMonthly >= entry.getKey() && repo.tryClaimPlayerGoal(connection, uuid, "monthly", entry.getKey(), context.monthKey())) {
                         pendingCommands.add(entry.getValue());
+                        monthlyGoalsReached.add(entry.getKey());
                         playerGoalCompleted = true;
                         if (entry.getKey() > highestMonthlyMilestone) highestMonthlyMilestone = entry.getKey();
                     }
@@ -333,6 +377,7 @@ public final class VoteService {
                 for (Map.Entry<Integer, List<String>> entry : config.globalDailyGoals().entrySet()) {
                     if (newGlobalDaily >= entry.getKey() && repo.tryClaimGlobalGoal(connection, "global_daily", entry.getKey(), context.dayKey())) {
                         pendingCommands.add(entry.getValue());
+                        globalDailyReached.add(entry.getKey());
                         globalGoalCompleted = true;
                     }
                 }
@@ -371,21 +416,40 @@ public final class VoteService {
                 ? messageService.text("double-site-bonus-inline", placeholders) : "");
 
         deliverNotificationsAndRewards(uuid, serviceName, config, placeholders,
-                pendingCommands, recurringReached, playerGoalCompleted, globalGoalCompleted, doubleSiteBonusCompleted);
+            pendingCommands, recurringReached, globalDailyReached, monthlyGoalsReached,
+            playerGoalCompleted, globalGoalCompleted, doubleSiteBonusCompleted);
     }
 
     private void deliverNotificationsAndRewards(
             UUID uuid, String serviceName, PluginConfig config,
             Map<String, String> placeholders, List<List<String>> pendingCommands,
-            List<Integer> recurringReached, boolean playerGoalCompleted,
+            List<Integer> recurringReached, List<Integer> globalDailyReached, List<Integer> monthlyGoalsReached,
+            boolean playerGoalCompleted,
             boolean globalGoalCompleted, boolean doubleSiteBonusCompleted
     ) {
         Bukkit.getScheduler().runTask(plugin, () -> {
             if (config.broadcastOnVote()) {
+                Player voter = Bukkit.getPlayer(uuid);
                 for (var line : messageService.messages("vote-broadcast", placeholders)) {
-                    Bukkit.broadcast(line);
+                    for (Player online : Bukkit.getOnlinePlayers()) {
+                        if (voter != null && online.getUniqueId().equals(voter.getUniqueId())) {
+                            continue;
+                        }
+                        if (isVoteAnnouncementMuted(online.getUniqueId(), online.getName())) {
+                            continue;
+                        }
+                        online.sendMessage(line);
+                    }
                 }
-                soundService.playToAll("vote.announcement");
+                for (Player online : Bukkit.getOnlinePlayers()) {
+                    if (voter != null && online.getUniqueId().equals(voter.getUniqueId())) {
+                        continue;
+                    }
+                    if (isVoteAnnouncementMuted(online.getUniqueId(), online.getName())) {
+                        continue;
+                    }
+                    soundService.play(online, "vote.announcement");
+                }
             }
 
             Player player = Bukkit.getPlayer(uuid);
@@ -393,6 +457,15 @@ public final class VoteService {
                 soundService.play(player, "vote.announcement");
                 showTitle(player, "vote.title", "vote.subtitle", placeholders);
                 if (playerGoalCompleted) soundService.play(player, "goal.completed");
+
+                for (Integer threshold : monthlyGoalsReached) {
+                    Map<String, String> mp = new HashMap<>(placeholders);
+                    mp.put("goal", Integer.toString(threshold));
+                    for (var line : messageService.messages("player-monthly-goal-completed", mp)) {
+                        player.sendMessage(line);
+                    }
+                }
+
                 if (doubleSiteBonusCompleted) {
                     String bonusMessage = config.doubleSiteBonusMessage();
                     if (bonusMessage != null && !bonusMessage.isBlank()) {
@@ -404,6 +477,22 @@ public final class VoteService {
             }
 
             if (globalGoalCompleted) soundService.playToAll("goal.completed");
+
+            for (Integer threshold : globalDailyReached) {
+                Map<String, String> gp = new HashMap<>(placeholders);
+                gp.put("goal", Integer.toString(threshold));
+                for (var line : messageService.messages("global-goal-completed-broadcast", gp)) {
+                    Bukkit.broadcast(line);
+                }
+            }
+
+            for (Integer threshold : recurringReached) {
+                Map<String, String> rp = new HashMap<>(placeholders);
+                rp.put("goal", Integer.toString(threshold));
+                for (var line : messageService.messages("global-recurring-goal-completed-broadcast", rp)) {
+                    Bukkit.broadcast(line);
+                }
+            }
 
             for (List<String> commands : pendingCommands) {
                 rewardExecutor.execute(commands, placeholders);

@@ -3,6 +3,7 @@ package com.valerinsmp.vvotes;
 import com.valerinsmp.vvotes.command.VoteAdminCommand;
 import com.valerinsmp.vvotes.command.VoteCommand;
 import com.valerinsmp.vvotes.command.VoteStatsCommand;
+import com.valerinsmp.vvotes.command.VVotesCommand;
 import com.valerinsmp.vvotes.config.ConfigService;
 import com.valerinsmp.vvotes.db.DatabaseManager;
 import com.valerinsmp.vvotes.listener.VoteListener;
@@ -121,6 +122,11 @@ public final class VVotesPlugin extends JavaPlugin {
             VoteAdminCommand command = new VoteAdminCommand(this);
             voteAdmin.setExecutor(command);
             voteAdmin.setTabCompleter(command);
+        }
+
+        PluginCommand vvotes = getCommand("vvotes");
+        if (vvotes != null) {
+            vvotes.setExecutor(new VVotesCommand(this));
         }
     }
 

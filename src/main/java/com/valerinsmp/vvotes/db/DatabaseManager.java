@@ -77,6 +77,13 @@ public final class DatabaseManager {
                 statement.execute("INSERT OR IGNORE INTO global_stats(id, daily_votes, last_daily_reset) VALUES (1, 0, '');");
 
                 statement.execute("""
+                        CREATE TABLE IF NOT EXISTS player_preferences (
+                            uuid TEXT PRIMARY KEY,
+                            mute_vote_announcements INTEGER NOT NULL DEFAULT 0
+                        );
+                        """);
+
+                statement.execute("""
                         CREATE TABLE IF NOT EXISTS goal_claims_global (
                             goal_type TEXT NOT NULL,
                             goal_value INTEGER NOT NULL,

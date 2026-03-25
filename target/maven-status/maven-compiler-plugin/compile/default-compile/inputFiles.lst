@@ -12,6 +12,7 @@ C:\Users\marti\Documents\GitHub\vVotes\src\main\java\com\valerinsmp\vvotes\servi
 C:\Users\marti\Documents\GitHub\vVotes\src\main\java\com\valerinsmp\vvotes\service\DrawCandidate.java
 C:\Users\marti\Documents\GitHub\vVotes\src\main\java\com\valerinsmp\vvotes\command\VoteStatsCommand.java
 C:\Users\marti\Documents\GitHub\vVotes\src\main\java\com\valerinsmp\vvotes\service\MessageService.java
+C:\Users\marti\Documents\GitHub\vVotes\src\main\java\com\valerinsmp\vvotes\command\VVotesCommand.java
 C:\Users\marti\Documents\GitHub\vVotes\src\main\java\com\valerinsmp\vvotes\db\DatabaseManager.java
 C:\Users\marti\Documents\GitHub\vVotes\src\main\java\com\valerinsmp\vvotes\service\GlobalState.java
 C:\Users\marti\Documents\GitHub\vVotes\src\main\java\com\valerinsmp\vvotes\listener\VoteListener.java
