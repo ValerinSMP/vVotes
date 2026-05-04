@@ -1,3 +1,11 @@
+double-site-bonus:
+  enabled: true
+  required-sites: 2
+  placeholder-icon: ' ☁ '
+  message: '%prefix%&a¡Has votado en los 2 sitios y ganado Fly por 1 hora!'
+  commands:
+  - lp user %player% permission settemp protectionblocks.fly true 1h server=survival
+
 storage:
   sqlite-file: data/vvotes.db
   busy-timeout-ms: 5000
@@ -8,30 +16,86 @@ global:
   broadcast-on-vote: true
   suspicious-window-seconds: 10
 
+services:
+  force-player-command:
+    40servidoresMC:
+      es:
+      - mivoto40
+
 goals:
-  global-daily: {}
+  global-daily:
+    '50':
+    - crate key giveall fire 1
+    '75':
+    - crate key giveall insane 1
+    '100':
+    - crate key giveall legendary 1
+    '125':
+    - pp spawn spawn
   global-recurring:
-    start-after: 0
-    every: 0
-    commands: []
-  player-monthly: {}
+    start-after: 125
+    every: 15
+    commands:
+    - pp spawn spawn
+  player-monthly:
+    '4':
+    - rec purse add <player> 10000
+    - crate key give <player> vote 2
+    '8':
+    - rec purse add <player> 12000
+    - crate key give <player> vote 2
+    '12':
+    - rec purse add <player> 14000
+    - give <player> netherite_ingot 1
+    '16':
+    - rec purse add <player> 16000
+    - crate key give <player> fire 1
+    '20':
+    - rec purse add <player> 18000
+    - crate key give <player> vote 3
+    '24':
+    - rec purse add <player> 20000
+    - give <player> enchanted_golden_apple 1
+    '28':
+    - rec purse add <player> 22000
+    - crate key give <player> fire 1
+    '32':
+    - rec purse add <player> 24000
+    - crate key give <player> vote 3
+    - give <player> netherite_ingot 1
+    '36':
+    - rec purse add <player> 26000
+    - crate key give <player> fire 1
+    '40':
+    - rec purse add <player> 30000
+    - crate key give <player> insane 1
+    - give <player> enchanted_golden_apple 1
+    '44':
+    - rec purse add <player> 32000
+    - crate key give <player> vote 4
+    '48':
+    - rec purse add <player> 36000
+    - crate key give <player> fire 1
+    - give <player> netherite_ingot 2
+    '52':
+    - rec purse add <player> 42000
+    - give <player> enchanted_golden_apple 2
+    '56':
+    - rec purse add <player> 50000
+    - crate key give <player> fire 2
+    '60':
+    - rec purse add <player> 70000
+    - crate key give <player> insane 1
+    - give <player> mace 1
 
 rewards:
-  vote: []
-  streak-monthly: {}
+  vote:
+  - rec purse add <player> 2500
+  - crate key give <player> vote 1
+  streak-monthly: []
 
 monthly-draw:
   enabled: true
   min-votes: 1
-  reward-command: ""
+  reward-command: lp user <player> parent addtemp arcano 30d
   auto-check-minutes: 5
-
-double-site-bonus:
-  enabled: false
-  required-sites: 2
-  placeholder-icon: "☁"
-  message: ""
-  commands: []
-
-services:
-  force-player-command: {}

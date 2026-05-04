@@ -197,9 +197,22 @@ public final class VoteService {
     }
 
     public int nextGlobalGoal(double currentValue) {
-        for (Integer threshold : configService.get().globalDailyGoals().keySet()) {
+        PluginConfig config = configService.get();
+        for (Integer threshold : config.globalDailyGoals().keySet()) {
             if (currentValue < threshold) return threshold;
         }
+
+        // Si no hay más metas diarias, considerar metas global-recurring (start-after + every)
+        int recurringStart = config.globalRecurringStart();
+        int recurringEvery = config.globalRecurringEvery();
+        if (recurringStart > 0 && recurringEvery > 0) {
+            int first = recurringStart + recurringEvery;
+            if (currentValue < first) return first;
+            int relative = (int) Math.floor(currentValue) - recurringStart;
+            int nextRel = nextRecurringThreshold(relative, recurringEvery);
+            return recurringStart + nextRel;
+        }
+
         return -1;
     }
 
