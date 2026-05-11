@@ -15,8 +15,7 @@
         <maven.compiler.source>21</maven.compiler.source>
         <maven.compiler.target>21</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <!-- Sobreescribir en la línea de comandos: mvn package -Dserver.plugins.dir=/ruta/plugins -->
-        <server.plugins.dir>C:/Users/marti/Desktop/plugins-v/plugins</server.plugins.dir>
+        <server.plugins.dir></server.plugins.dir>
     </properties>
 
     <repositories>
@@ -91,28 +90,49 @@
                     </execution>
                 </executions>
             </plugin>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-antrun-plugin</artifactId>
-                <version>3.1.0</version>
-                <executions>
-                    <execution>
-                        <id>copy-jar-to-server-plugins</id>
-                        <phase>package</phase>
-                        <goals>
-                            <goal>run</goal>
-                        </goals>
-                        <configuration>
-                            <target>
-                                <mkdir dir="${server.plugins.dir}"/>
-                                <copy file="${project.build.directory}/${project.build.finalName}.jar"
-                                      todir="${server.plugins.dir}"
-                                      overwrite="true"/>
-                            </target>
-                        </configuration>
-                    </execution>
-                </executions>
-            </plugin>
         </plugins>
     </build>
+
+    <profiles>
+        <profile>
+            <id>copy-to-server</id>
+            <activation>
+                <property>
+                    <name>copyToServer</name>
+                    <value>true</value>
+                </property>
+            </activation>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-antrun-plugin</artifactId>
+                        <version>3.1.0</version>
+                        <executions>
+                            <execution>
+                                <id>copy-jar-to-server-plugins</id>
+                                <phase>package</phase>
+                                <goals>
+                                    <goal>run</goal>
+                                </goals>
+                                <configuration>
+                                    <target>
+                                        <fail message="Define -Dserver.plugins.dir cuando uses -DcopyToServer=true">
+                                            <condition>
+                                                <equals arg1="${server.plugins.dir}" arg2=""/>
+                                            </condition>
+                                        </fail>
+                                        <mkdir dir="${server.plugins.dir}"/>
+                                        <copy file="${project.build.directory}/${project.build.finalName}.jar"
+                                              todir="${server.plugins.dir}"
+                                              overwrite="true"/>
+                                    </target>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 </project>

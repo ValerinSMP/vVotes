@@ -1,14 +1,14 @@
 titles:
-  main: '&#6EE7B7&lᴠᴏᴛᴇs'
+  main: '&#6EE7B7&lá´ á´á´›á´‡s'
   subtitle: '&fSistema de votos'
   vote:
-    title: '&#34D399&lᴠᴏᴛᴏ ʀᴇᴄɪʙɪᴅᴏ'
+    title: '&#34D399&lá´ á´á´›á´ Ê€á´‡á´„ÉªÊ™Éªá´…á´'
     subtitle: '&fGracias por apoyar el servidor'
   global-goal:
-    title: '&#10B981&lᴍᴇᴛᴀ ɢʟᴏʙᴀʟ'
+    title: '&#10B981&lá´á´‡á´›á´€ É¢ÊŸá´Ê™á´€ÊŸ'
     subtitle: '&fLa comunidad alcanzo %goal% votos'
   monthly-goal:
-    title: '&#22C55E&lᴍᴇᴛᴀ ᴍᴇɴsᴜᴀʟ'
+    title: '&#22C55E&lá´á´‡á´›á´€ á´á´‡É´sá´œá´€ÊŸ'
     subtitle: '&fAlcanzaste %goal% votos este mes'
 
 actionbar:
@@ -16,7 +16,7 @@ actionbar:
   monthly-progress: '&fTus votos del mes: &#22C55E%monthly% &8| &fSiguiente: &#6EE7B7%next_monthly_goal%'
 
 messages:
-  prefix: '&8[&#34D399ᴠᴏᴛᴇs&8]&r '
+  prefix: '&8[&#34D399á´ á´á´›á´‡s&8]&r '
   player-only: '%prefix%Solo un jugador puede usar este comando.'
   no-permission: '%prefix%No tienes permisos para esto.'
   reload-ok: '%prefix%Configuracion recargada correctamente.'
@@ -67,6 +67,7 @@ messages:
   - ''
   vote-offline-skip: '%prefix%El voto de &#6EE7B7%player% &fno se proceso porque no estaba online.'
   vote-offline-pending: '%prefix%El voto de &#6EE7B7%player% &fse guardara y entregara cuando se conecte.'
+  vote-pending-delivered: '%prefix%Se entregaron &#6EE7B7%amount% &fvoto(s) pendientes.'
   vote-broadcast:
   - ''
   - '%prefix%&#34D399%player% &fha votado por el servidor y ha recibido sus recompensas, apoyanos con &#22C55E/vote%monthly_bonus%%double_site_bonus%'

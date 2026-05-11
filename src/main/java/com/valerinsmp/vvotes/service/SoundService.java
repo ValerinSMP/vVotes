@@ -2,6 +2,8 @@ package com.valerinsmp.vvotes.service;
 
 import com.valerinsmp.vvotes.VVotesPlugin;
 import org.bukkit.Bukkit;
+import org.bukkit.NamespacedKey;
+import org.bukkit.Registry;
 import org.bukkit.Sound;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.YamlConfiguration;
@@ -72,10 +74,8 @@ public final class SoundService {
         if (soundName.isBlank()) {
             return;
         }
-        Sound sound;
-        try {
-            sound = Sound.valueOf(soundName.toUpperCase());
-        } catch (IllegalArgumentException exception) {
+        Sound sound = resolveSound(soundName);
+        if (sound == null) {
             plugin.getLogger().warning("Sonido invalido en sound.yml: " + path + " -> " + soundName);
             return;
         }
@@ -86,5 +86,29 @@ public final class SoundService {
     }
 
     private record SoundEntry(boolean enabled, Sound sound, float volume, float pitch) {
+    }
+
+    private Sound resolveSound(String raw) {
+        String input = raw.trim();
+        if (input.isBlank()) {
+            return null;
+        }
+
+        // 1) Backward compatible enum style: BLOCK_RESPAWN_ANCHOR_CHARGE
+        String enumLike = input.toUpperCase().replace(' ', '_');
+        try {
+            @SuppressWarnings("removal")
+            Sound legacy = Sound.valueOf(enumLike);
+            return legacy;
+        } catch (IllegalArgumentException ignored) {
+        }
+
+        // 2) Namespaced key style: minecraft:block.respawn_anchor.charge
+        String normalized = input.toLowerCase().replace(' ', '_');
+        NamespacedKey key = NamespacedKey.fromString(normalized.contains(":") ? normalized : "minecraft:" + normalized);
+        if (key == null) {
+            return null;
+        }
+        return Registry.SOUNDS.get(key);
     }
 }

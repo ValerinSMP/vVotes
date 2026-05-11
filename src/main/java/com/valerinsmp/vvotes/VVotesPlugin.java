@@ -22,8 +22,9 @@ import org.bukkit.scheduler.BukkitTask;
 
 import java.io.File;
 import java.io.InputStream;
-import java.io.InputStreamReader;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 
 public final class VVotesPlugin extends JavaPlugin {
 
@@ -80,6 +81,7 @@ public final class VVotesPlugin extends JavaPlugin {
             messageService.reload();
             soundService.reload();
             databaseManager.initialize();
+            voteService.invalidateStatsCache();
             voteService.sealGoalsForCurrentDay();
             registerPlaceholderExpansion();
             startMonthlyDrawTask();
@@ -158,7 +160,7 @@ public final class VVotesPlugin extends JavaPlugin {
         }
         int everyMinutes = Math.max(1, configService.get().monthlyDrawAutoCheckMinutes());
         long periodTicks = everyMinutes * 60L * 20L;
-        monthlyDrawTask = Bukkit.getScheduler().runTaskTimer(this, () -> {
+        monthlyDrawTask = Bukkit.getScheduler().runTaskTimerAsynchronously(this, () -> {
             MonthlyDrawResult result = voteService.runAutoMonthlyDrawIfNeeded();
             if (result.status() == MonthlyDrawResult.Status.SUCCESS) {
                 getLogger().info("Sorteo mensual automatico ejecutado para " + result.monthKey() + ", ganador: " + result.winnerName());
@@ -192,8 +194,8 @@ public final class VVotesPlugin extends JavaPlugin {
                 return;
             }
 
-            YamlConfiguration current = YamlConfiguration.loadConfiguration(file);
-            YamlConfiguration defaults = YamlConfiguration.loadConfiguration(new InputStreamReader(input, StandardCharsets.UTF_8));
+            YamlConfiguration current = loadYamlSafely(file);
+            YamlConfiguration defaults = loadYamlSafely(input);
 
             boolean changed = false;
             for (String path : defaults.getKeys(true)) {
@@ -210,5 +212,43 @@ public final class VVotesPlugin extends JavaPlugin {
         } catch (Exception exception) {
             getLogger().warning("No se pudieron fusionar defaults de " + resourceName + ": " + exception.getMessage());
         }
+    }
+
+    private YamlConfiguration loadYamlSafely(File file) throws IOException {
+        String text = Files.readString(file.toPath(), StandardCharsets.UTF_8);
+        return loadYamlFromText(text);
+    }
+
+    private YamlConfiguration loadYamlSafely(InputStream input) throws IOException {
+        String text = new String(input.readAllBytes(), StandardCharsets.UTF_8);
+        return loadYamlFromText(text);
+    }
+
+    private YamlConfiguration loadYamlFromText(String rawText) {
+        String text = sanitizeYamlText(rawText);
+        YamlConfiguration yaml = new YamlConfiguration();
+        try {
+            yaml.loadFromString(text);
+        } catch (Exception exception) {
+            throw new IllegalStateException("YAML invalido tras saneamiento: " + exception.getMessage(), exception);
+        }
+        return yaml;
+    }
+
+    private String sanitizeYamlText(String input) {
+        String text = input.startsWith("\uFEFF") ? input.substring(1) : input;
+        StringBuilder sanitized = new StringBuilder(text.length());
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (c == '\n' || c == '\r' || c == '\t') {
+                sanitized.append(c);
+                continue;
+            }
+            if (Character.isISOControl(c)) {
+                continue;
+            }
+            sanitized.append(c);
+        }
+        return sanitized.toString();
     }
 }

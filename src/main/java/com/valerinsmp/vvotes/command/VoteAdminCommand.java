@@ -7,6 +7,7 @@ import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
 import org.bukkit.command.CommandSender;
 import org.bukkit.command.TabCompleter;
+import org.bukkit.scheduler.BukkitScheduler;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -59,8 +60,8 @@ public final class VoteAdminCommand implements CommandExecutor, TabCompleter {
                 ));
             }
             case "resetdaily" -> {
-                plugin.getVoteService().forceResetGlobalDaily();
-                plugin.getMessageService().send(sender, "admin-reset-daily-ok");
+                plugin.getVoteService().forceResetGlobalDailyAsync().whenComplete((unused, throwable) ->
+                        sync(() -> plugin.getMessageService().send(sender, "admin-reset-daily-ok")));
             }
             case "resetmonthly" -> {
                 if (args.length < 2) {
@@ -68,10 +69,10 @@ public final class VoteAdminCommand implements CommandExecutor, TabCompleter {
                     return true;
                 }
                 OfflinePlayer target = Bukkit.getOfflinePlayer(args[1]);
-                plugin.getVoteService().forceResetPlayerMonthly(target);
-                plugin.getMessageService().send(sender, "admin-reset-monthly-ok", Map.of(
-                        "player", target.getName() == null ? args[1] : target.getName()
-                ));
+                plugin.getVoteService().forceResetPlayerMonthlyAsync(target).whenComplete((unused, throwable) -> sync(() ->
+                        plugin.getMessageService().send(sender, "admin-reset-monthly-ok", Map.of(
+                                "player", target.getName() == null ? args[1] : target.getName()
+                        ))));
             }
             case "adddaily" -> {
                 if (args.length < 3) {
@@ -90,12 +91,12 @@ public final class VoteAdminCommand implements CommandExecutor, TabCompleter {
                     plugin.getMessageService().send(sender, "usage-voteadmin-adddaily");
                     return true;
                 }
-                double updated = plugin.getVoteService().adjustPlayerDailyVotes(target, amount);
-                plugin.getMessageService().send(sender, "admin-adddaily-ok", Map.of(
-                        "player", target.getName() == null ? args[1] : target.getName(),
-                        "amount", Integer.toString(amount),
-                        "daily", plugin.getVoteService().formatDouble(Math.max(0, updated))
-                ));
+                plugin.getVoteService().adjustPlayerDailyVotesAsync(target, amount).whenComplete((updated, throwable) -> sync(() ->
+                        plugin.getMessageService().send(sender, "admin-adddaily-ok", Map.of(
+                                "player", target.getName() == null ? args[1] : target.getName(),
+                                "amount", Integer.toString(amount),
+                                "daily", plugin.getVoteService().formatDouble(Math.max(0, updated == null ? -1 : updated))
+                        ))));
             }
             case "removedaily" -> {
                 if (args.length < 3) {
@@ -114,12 +115,12 @@ public final class VoteAdminCommand implements CommandExecutor, TabCompleter {
                     plugin.getMessageService().send(sender, "usage-voteadmin-removedaily");
                     return true;
                 }
-                double updated = plugin.getVoteService().adjustPlayerDailyVotes(target, -amount);
-                plugin.getMessageService().send(sender, "admin-removedaily-ok", Map.of(
-                        "player", target.getName() == null ? args[1] : target.getName(),
-                        "amount", Integer.toString(amount),
-                        "daily", plugin.getVoteService().formatDouble(Math.max(0, updated))
-                ));
+                plugin.getVoteService().adjustPlayerDailyVotesAsync(target, -amount).whenComplete((updated, throwable) -> sync(() ->
+                        plugin.getMessageService().send(sender, "admin-removedaily-ok", Map.of(
+                                "player", target.getName() == null ? args[1] : target.getName(),
+                                "amount", Integer.toString(amount),
+                                "daily", plugin.getVoteService().formatDouble(Math.max(0, updated == null ? -1 : updated))
+                        ))));
             }
             case "addglobaldaily" -> {
                 if (args.length < 2) {
@@ -137,11 +138,11 @@ public final class VoteAdminCommand implements CommandExecutor, TabCompleter {
                     plugin.getMessageService().send(sender, "usage-voteadmin-addglobaldaily");
                     return true;
                 }
-                double updated = plugin.getVoteService().adjustGlobalDailyVotes(amount);
-                plugin.getMessageService().send(sender, "admin-addglobaldaily-ok", Map.of(
-                        "amount", Integer.toString(amount),
-                        "daily_global", plugin.getVoteService().formatDouble(Math.max(0, updated))
-                ));
+                plugin.getVoteService().adjustGlobalDailyVotesAsync(amount).whenComplete((updated, throwable) -> sync(() ->
+                        plugin.getMessageService().send(sender, "admin-addglobaldaily-ok", Map.of(
+                                "amount", Integer.toString(amount),
+                                "daily_global", plugin.getVoteService().formatDouble(Math.max(0, updated == null ? -1 : updated))
+                        ))));
             }
             case "removeglobaldaily" -> {
                 if (args.length < 2) {
@@ -159,81 +160,92 @@ public final class VoteAdminCommand implements CommandExecutor, TabCompleter {
                     plugin.getMessageService().send(sender, "usage-voteadmin-removeglobaldaily");
                     return true;
                 }
-                double updated = plugin.getVoteService().adjustGlobalDailyVotes(-amount);
-                plugin.getMessageService().send(sender, "admin-removeglobaldaily-ok", Map.of(
-                        "amount", Integer.toString(amount),
-                        "daily_global", plugin.getVoteService().formatDouble(Math.max(0, updated))
-                ));
+                plugin.getVoteService().adjustGlobalDailyVotesAsync(-amount).whenComplete((updated, throwable) -> sync(() ->
+                        plugin.getMessageService().send(sender, "admin-removeglobaldaily-ok", Map.of(
+                                "amount", Integer.toString(amount),
+                                "daily_global", plugin.getVoteService().formatDouble(Math.max(0, updated == null ? -1 : updated))
+                        ))));
             }
             case "drawmonthly" -> {
                 String monthKey = args.length >= 2 ? args[1] : null;
                 String executor = sender.getName() == null || sender.getName().isBlank() ? "console" : sender.getName();
-                var result = plugin.getVoteService().drawMonthly(monthKey, executor);
-                switch (result.status()) {
-                    case SUCCESS -> plugin.getMessageService().send(sender, "admin-drawmonthly-success", Map.of(
-                            "month", result.monthKey(),
-                            "winner", result.winnerName(),
-                            "votes", plugin.getVoteService().formatDouble(result.topVotes()),
-                            "candidates", Integer.toString(result.candidatesCount())
-                    ));
-                    case NO_PARTICIPANTS -> plugin.getMessageService().send(sender, "admin-drawmonthly-no-participants", Map.of(
-                            "month", result.monthKey(),
-                            "votes", plugin.getVoteService().formatDouble(result.topVotes())
-                    ));
-                    case ALREADY_DRAWN -> plugin.getMessageService().send(sender, "admin-drawmonthly-already-drawn", Map.of(
-                            "month", result.monthKey()
-                    ));
-                    case DISABLED -> plugin.getMessageService().send(sender, "admin-drawmonthly-disabled");
-                    case INVALID_MONTH -> plugin.getMessageService().send(sender, "admin-drawmonthly-invalid-month", Map.of(
-                            "month", result.monthKey()
-                    ));
-                    case ERROR -> plugin.getMessageService().send(sender, "admin-drawmonthly-error", Map.of(
-                            "error", result.error()
-                    ));
-                }
+                plugin.getVoteService().drawMonthlyAsync(monthKey, executor).whenComplete((result, throwable) -> sync(() -> {
+                    if (result == null) {
+                        plugin.getMessageService().send(sender, "admin-drawmonthly-error", Map.of("error", "unknown"));
+                        return;
+                    }
+                    switch (result.status()) {
+                        case SUCCESS -> plugin.getMessageService().send(sender, "admin-drawmonthly-success", Map.of(
+                                "month", result.monthKey(),
+                                "winner", result.winnerName(),
+                                "votes", plugin.getVoteService().formatDouble(result.topVotes()),
+                                "candidates", Integer.toString(result.candidatesCount())
+                        ));
+                        case NO_PARTICIPANTS -> plugin.getMessageService().send(sender, "admin-drawmonthly-no-participants", Map.of(
+                                "month", result.monthKey(),
+                                "votes", plugin.getVoteService().formatDouble(result.topVotes())
+                        ));
+                        case ALREADY_DRAWN -> plugin.getMessageService().send(sender, "admin-drawmonthly-already-drawn", Map.of(
+                                "month", result.monthKey()
+                        ));
+                        case DISABLED -> plugin.getMessageService().send(sender, "admin-drawmonthly-disabled");
+                        case INVALID_MONTH -> plugin.getMessageService().send(sender, "admin-drawmonthly-invalid-month", Map.of(
+                                "month", result.monthKey()
+                        ));
+                        case ERROR -> plugin.getMessageService().send(sender, "admin-drawmonthly-error", Map.of(
+                                "error", result.error()
+                        ));
+                    }
+                }));
             }
             case "topmonth" -> {
                 java.time.ZoneId zone = java.time.ZoneId.of(plugin.getVoteService().getTimezoneId());
                 String monthKey = args.length >= 2 ? args[1] : java.time.YearMonth.now(zone).toString();
-                var top = plugin.getVoteService().getTopMonth(monthKey, 10);
-                if (top.isEmpty()) {
-                    plugin.getMessageService().send(sender, "admin-topmonth-empty", Map.of("month", monthKey));
-                } else {
-                    plugin.getMessageService().send(sender, "admin-topmonth-header", Map.of("month", monthKey));
-                    for (var entry : top) {
-                        plugin.getMessageService().send(sender, "admin-topmonth-entry", Map.of(
-                                "pos", Integer.toString(entry.position()),
-                                "player", entry.playerName(),
-                                "votes", plugin.getVoteService().formatDouble(entry.votes())
-                        ));
+                plugin.getVoteService().getTopMonthAsync(monthKey, 10).whenComplete((top, throwable) -> sync(() -> {
+                    if (top == null || top.isEmpty()) {
+                        plugin.getMessageService().send(sender, "admin-topmonth-empty", Map.of("month", monthKey));
+                    } else {
+                        plugin.getMessageService().send(sender, "admin-topmonth-header", Map.of("month", monthKey));
+                        for (var entry : top) {
+                            plugin.getMessageService().send(sender, "admin-topmonth-entry", Map.of(
+                                    "pos", Integer.toString(entry.position()),
+                                    "player", entry.playerName(),
+                                    "votes", plugin.getVoteService().formatDouble(entry.votes())
+                            ));
+                        }
                     }
-                }
+                }));
             }
             case "drawhistory" -> {
                 String monthKey = args.length >= 2 ? args[1] : null;
-                var result = plugin.getVoteService().getDrawHistory(monthKey);
-                switch (result.status()) {
-                    case FOUND -> plugin.getMessageService().send(sender, "admin-drawhistory-found", Map.of(
-                            "month", result.monthKey(),
-                            "winner", result.winnerName(),
-                            "uuid", result.winnerUuid(),
-                            "votes", plugin.getVoteService().formatDouble(result.topVotes()),
-                            "candidates", Integer.toString(result.candidatesCount()),
-                            "executed_by", result.executedBy(),
-                            "date", java.time.Instant.ofEpochSecond(result.executedEpoch())
-                                    .atZone(java.time.ZoneId.of(plugin.getVoteService().getTimezoneId()))
-                                    .toLocalDate().toString()
-                    ));
-                    case NOT_FOUND -> plugin.getMessageService().send(sender, "admin-drawhistory-not-found", Map.of(
-                            "month", result.monthKey()
-                    ));
-                    case INVALID_MONTH -> plugin.getMessageService().send(sender, "admin-drawmonthly-invalid-month", Map.of(
-                            "month", result.monthKey()
-                    ));
-                    case ERROR -> plugin.getMessageService().send(sender, "admin-drawmonthly-error", Map.of(
-                            "error", result.error()
-                    ));
-                }
+                plugin.getVoteService().getDrawHistoryAsync(monthKey).whenComplete((result, throwable) -> sync(() -> {
+                    if (result == null) {
+                        plugin.getMessageService().send(sender, "admin-drawmonthly-error", Map.of("error", "unknown"));
+                        return;
+                    }
+                    switch (result.status()) {
+                        case FOUND -> plugin.getMessageService().send(sender, "admin-drawhistory-found", Map.of(
+                                "month", result.monthKey(),
+                                "winner", result.winnerName(),
+                                "uuid", result.winnerUuid(),
+                                "votes", plugin.getVoteService().formatDouble(result.topVotes()),
+                                "candidates", Integer.toString(result.candidatesCount()),
+                                "executed_by", result.executedBy(),
+                                "date", java.time.Instant.ofEpochSecond(result.executedEpoch())
+                                        .atZone(java.time.ZoneId.of(plugin.getVoteService().getTimezoneId()))
+                                        .toLocalDate().toString()
+                        ));
+                        case NOT_FOUND -> plugin.getMessageService().send(sender, "admin-drawhistory-not-found", Map.of(
+                                "month", result.monthKey()
+                        ));
+                        case INVALID_MONTH -> plugin.getMessageService().send(sender, "admin-drawmonthly-invalid-month", Map.of(
+                                "month", result.monthKey()
+                        ));
+                        case ERROR -> plugin.getMessageService().send(sender, "admin-drawmonthly-error", Map.of(
+                                "error", result.error()
+                        ));
+                    }
+                }));
             }
             default -> plugin.getMessageService().send(sender, "usage-voteadmin");
         }
@@ -280,5 +292,14 @@ public final class VoteAdminCommand implements CommandExecutor, TabCompleter {
             }
         }
         return result;
+    }
+
+    private void sync(Runnable runnable) {
+        BukkitScheduler scheduler = Bukkit.getScheduler();
+        if (Bukkit.isPrimaryThread()) {
+            runnable.run();
+            return;
+        }
+        scheduler.runTask(plugin, runnable);
     }
 }

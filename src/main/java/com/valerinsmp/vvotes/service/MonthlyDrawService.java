@@ -51,9 +51,7 @@ public final class MonthlyDrawService {
             return MonthlyDrawResult.invalidMonth(key);
         }
 
-        Connection connection = null;
-        try {
-            connection = repo.connection();
+        try (Connection connection = repo.connection()) {
             connection.setAutoCommit(false);
 
             if (repo.isMonthAlreadyDrawn(connection, key)) {
@@ -85,12 +83,12 @@ public final class MonthlyDrawService {
             placeholders.put("votes", VoteService.formatDoubleStatic(maxVotes));
             placeholders.put("candidates", Integer.toString(candidates.size()));
 
-            rewardExecutor.execute(List.of(rewardCommand), placeholders);
             repo.insertMonthlyDrawHistory(connection, key, winner, maxVotes, candidates.size(), executedBy, rewardCommand);
             connection.commit();
             connection.setAutoCommit(true);
 
             Bukkit.getScheduler().runTask(plugin, () -> {
+                rewardExecutor.execute(List.of(rewardCommand), placeholders);
                 for (var line : messageService.messages("draw-monthly-winner-broadcast", placeholders)) {
                     Bukkit.broadcast(line);
                 }
@@ -99,9 +97,6 @@ public final class MonthlyDrawService {
 
             return MonthlyDrawResult.success(key, winner.name(), maxVotes, candidates.size());
         } catch (SQLException exception) {
-            if (connection != null) {
-                try { connection.rollback(); connection.setAutoCommit(true); } catch (SQLException ignored) {}
-            }
             plugin.getLogger().severe("Error en sorteo mensual: " + exception.getMessage());
             return MonthlyDrawResult.error(key, exception.getMessage());
         }
@@ -116,8 +111,8 @@ public final class MonthlyDrawService {
         } catch (Exception ignored) {
             return DrawHistoryResult.invalidMonth(key);
         }
-        try {
-            return repo.fetchDrawHistory(repo.connection(), key);
+        try (Connection connection = repo.connection()) {
+            return repo.fetchDrawHistory(connection, key);
         } catch (SQLException exception) {
             plugin.getLogger().warning("Error consultando historial sorteo: " + exception.getMessage());
             return DrawHistoryResult.error(key, exception.getMessage());
@@ -128,8 +123,8 @@ public final class MonthlyDrawService {
         final String key = (monthKey == null || monthKey.isBlank())
                 ? YearMonth.now(ZoneId.of(configService.get().timezone())).toString()
                 : monthKey;
-        try {
-            return repo.fetchTopMonth(repo.connection(), key, limit);
+        try (Connection connection = repo.connection()) {
+            return repo.fetchTopMonth(connection, key, limit);
         } catch (SQLException exception) {
             plugin.getLogger().warning("Error consultando top mensual: " + exception.getMessage());
             return List.of();

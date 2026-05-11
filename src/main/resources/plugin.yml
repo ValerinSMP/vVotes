@@ -19,7 +19,7 @@ commands:
     permission: vvotes.use
   voteadmin:
     description: Administracion de vVotes.
-    usage: /voteadmin <reload|add|resetdaily|resetmonthly|adddaily|removedaily|addglobaldaily|removeglobaldaily|drawmonthly>
+    usage: /voteadmin <reload|add|resetdaily|resetmonthly|adddaily|removedaily|addglobaldaily|removeglobaldaily|drawmonthly|drawhistory|topmonth>
     permission: vvotes.admin
 permissions:
   vvotes.use:

@@ -33,7 +33,7 @@ El jar final queda en `target/vVotes-1.0.0.jar`.
 - `%vvotes_global_daily%`
 - `%vvotes_next_global_goal%`
 - `%vvotes_next_monthly_goal%`
-- `%vvotes_double_site_today_icon%` (muestra `☁` cuando ya voto en 2 sitios hoy, o vacio si no)
+- `%vvotes_double_site_today_icon%` (muestra `â˜` cuando ya voto en 2 sitios hoy, o vacio si no)
 
 ## Configuracion
 - `config.yml`: rewards, metas y timezone.
@@ -42,5 +42,5 @@ El jar final queda en `target/vVotes-1.0.0.jar`.
 
 ## Notas funcionales
 - Recompensa automatica al votar.
-- Si el jugador esta offline, el voto se omite (no se guarda para entregar despues).
+- Si el jugador esta offline, el voto se guarda en pendientes y se entrega al conectarse.
 - SQLite optimizado con WAL y retencion indefinida de historial (`vote_logs`).

@@ -9,6 +9,7 @@ import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
+import org.bukkit.event.player.PlayerJoinEvent;
 
 public final class VoteListener implements Listener {
     private final VVotesPlugin plugin;
@@ -24,9 +25,15 @@ public final class VoteListener implements Listener {
         Vote vote = event.getVote();
         Player player = Bukkit.getPlayer(vote.getUsername());
         if (player == null || !player.isOnline()) {
-            plugin.getLogger().info("Voto de " + vote.getUsername() + " descartado: jugador no conectado.");
+            voteService.enqueueOfflineVote(vote.getUsername(), vote.getServiceName());
+            plugin.getLogger().info("Voto de " + vote.getUsername() + " guardado en pendientes: jugador no conectado.");
             return;
         }
         voteService.handleVote(player, vote.getServiceName());
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onPlayerJoin(PlayerJoinEvent event) {
+        voteService.processPendingVotes(event.getPlayer());
     }
 }

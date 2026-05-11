@@ -14,16 +14,23 @@ public final class CommandRewardExecutor {
     }
 
     public void execute(List<String> commands, Map<String, String> placeholders) {
-        for (String command : commands) {
-            String parsed = command;
-            for (Map.Entry<String, String> entry : placeholders.entrySet()) {
-                parsed = parsed.replace("<" + entry.getKey() + ">", entry.getValue());
-                parsed = parsed.replace("%" + entry.getKey() + "%", entry.getValue());
+        Runnable dispatch = () -> {
+            for (String command : commands) {
+                String parsed = command;
+                for (Map.Entry<String, String> entry : placeholders.entrySet()) {
+                    parsed = parsed.replace("<" + entry.getKey() + ">", entry.getValue());
+                    parsed = parsed.replace("%" + entry.getKey() + "%", entry.getValue());
+                }
+                if (parsed.isBlank()) {
+                    continue;
+                }
+                Bukkit.dispatchCommand(Bukkit.getConsoleSender(), parsed);
             }
-            if (parsed.isBlank()) {
-                continue;
-            }
-            Bukkit.dispatchCommand(Bukkit.getConsoleSender(), parsed);
+        };
+        if (Bukkit.isPrimaryThread()) {
+            dispatch.run();
+            return;
         }
+        Bukkit.getScheduler().runTask(plugin, dispatch);
     }
 }

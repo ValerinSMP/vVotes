@@ -25,6 +25,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CompletableFuture;
 
 public final class VoteService {
 
@@ -61,7 +62,7 @@ public final class VoteService {
         this.monthlyDrawService = new MonthlyDrawService(plugin, configService, messageService, soundService, repo, rewardExecutor);
     }
 
-    // ── Public API ────────────────────────────────────────────────────────────
+    // â”€â”€ Public API â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     public void handleVote(Player player, String serviceName) {
         UUID uuid = player.getUniqueId();
@@ -72,10 +73,86 @@ public final class VoteService {
         });
     }
 
+    public void enqueueOfflineVote(String playerName, String serviceName) {
+        if (playerName == null || playerName.isBlank()) {
+            return;
+        }
+        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+            try (Connection connection = repo.connection()) {
+                repo.insertPendingVote(connection, playerName, serviceName == null ? "unknown" : serviceName);
+            } catch (SQLException exception) {
+                plugin.getLogger().warning("No se pudo guardar voto pendiente de " + playerName + ": " + exception.getMessage());
+            }
+        });
+    }
+
+    public void processPendingVotes(Player player) {
+        if (player == null) {
+            return;
+        }
+        UUID uuid = player.getUniqueId();
+        String playerName = player.getName();
+        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+            List<VoteRepository.PendingVoteRow> rows;
+            try (Connection connection = repo.connection()) {
+                rows = repo.fetchPendingVotes(connection, playerName);
+            } catch (SQLException exception) {
+                plugin.getLogger().warning("No se pudieron leer votos pendientes de " + playerName + ": " + exception.getMessage());
+                return;
+            }
+            if (rows.isEmpty()) {
+                return;
+            }
+            for (VoteRepository.PendingVoteRow row : rows) {
+                processVote(uuid, playerName, row.serviceName(), 1.0, true);
+                try (Connection connection = repo.connection()) {
+                    repo.deletePendingVote(connection, row.id());
+                } catch (SQLException exception) {
+                    plugin.getLogger().warning("No se pudo eliminar voto pendiente id=" + row.id() + ": " + exception.getMessage());
+                }
+            }
+            statsCache.remove(uuid);
+            Bukkit.getScheduler().runTask(plugin, () -> {
+                Player online = Bukkit.getPlayer(uuid);
+                if (online != null && online.isOnline()) {
+                    plugin.getMessageService().send(online, "vote-pending-delivered", Map.of("amount", Integer.toString(rows.size())));
+                }
+            });
+        });
+    }
+
     public void addManualVotes(OfflinePlayer target, int amount) {
         if (amount <= 0 || target.getUniqueId() == null) return;
         String name = target.getName() == null ? target.getUniqueId().toString() : target.getName();
         processVote(target.getUniqueId(), name, "manual", amount, false);
+    }
+
+    public CompletableFuture<Double> adjustGlobalDailyVotesAsync(int delta) {
+        return CompletableFuture.supplyAsync(() -> adjustGlobalDailyVotes(delta), r -> Bukkit.getScheduler().runTaskAsynchronously(plugin, r));
+    }
+
+    public CompletableFuture<Double> adjustPlayerDailyVotesAsync(OfflinePlayer target, int delta) {
+        return CompletableFuture.supplyAsync(() -> adjustPlayerDailyVotes(target, delta), r -> Bukkit.getScheduler().runTaskAsynchronously(plugin, r));
+    }
+
+    public CompletableFuture<Void> forceResetGlobalDailyAsync() {
+        return CompletableFuture.runAsync(this::forceResetGlobalDaily, r -> Bukkit.getScheduler().runTaskAsynchronously(plugin, r));
+    }
+
+    public CompletableFuture<Void> forceResetPlayerMonthlyAsync(OfflinePlayer target) {
+        return CompletableFuture.runAsync(() -> forceResetPlayerMonthly(target), r -> Bukkit.getScheduler().runTaskAsynchronously(plugin, r));
+    }
+
+    public CompletableFuture<MonthlyDrawResult> drawMonthlyAsync(String monthKey, String executedBy) {
+        return CompletableFuture.supplyAsync(() -> drawMonthly(monthKey, executedBy), r -> Bukkit.getScheduler().runTaskAsynchronously(plugin, r));
+    }
+
+    public CompletableFuture<DrawHistoryResult> getDrawHistoryAsync(String monthKey) {
+        return CompletableFuture.supplyAsync(() -> getDrawHistory(monthKey), r -> Bukkit.getScheduler().runTaskAsynchronously(plugin, r));
+    }
+
+    public CompletableFuture<List<TopMonthEntry>> getTopMonthAsync(String monthKey, int limit) {
+        return CompletableFuture.supplyAsync(() -> getTopMonth(monthKey, limit), r -> Bukkit.getScheduler().runTaskAsynchronously(plugin, r));
     }
 
     public MonthlyDrawResult runAutoMonthlyDrawIfNeeded() {
@@ -103,8 +180,7 @@ public final class VoteService {
             return false;
         }
         String safeName = (playerName == null || playerName.isBlank()) ? uuid.toString() : playerName;
-        try {
-            Connection connection = repo.connection();
+        try (Connection connection = repo.connection()) {
             repo.fetchOrCreateStats(connection, uuid, safeName);
             boolean currentlyMuted = repo.isVoteAnnouncementMuted(connection, uuid);
             boolean updated = !currentlyMuted;
@@ -126,8 +202,7 @@ public final class VoteService {
             return cached;
         }
         String safeName = (playerName == null || playerName.isBlank()) ? uuid.toString() : playerName;
-        try {
-            Connection connection = repo.connection();
+        try (Connection connection = repo.connection()) {
             repo.fetchOrCreateStats(connection, uuid, safeName);
             boolean muted = repo.isVoteAnnouncementMuted(connection, uuid);
             voteAnnouncementMuteCache.put(uuid, muted);
@@ -140,8 +215,7 @@ public final class VoteService {
 
     public void sealGoalsForCurrentDay() {
         Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
-            try {
-                Connection connection = repo.connection();
+            try (Connection connection = repo.connection()) {
                 DateContext context = currentContext();
                 double globalDaily = repo.readGlobalDailyVotes(connection, context.dayKey());
                 PluginConfig config = configService.get();
@@ -170,8 +244,7 @@ public final class VoteService {
     public PlayerStats getStats(UUID uuid, String playerName) {
         CachedStats cached = statsCache.get(uuid);
         if (cached != null && !cached.isExpired()) return cached.stats();
-        try {
-            Connection connection = repo.connection();
+        try (Connection connection = repo.connection()) {
             PlayerStats stats = repo.fetchOrCreateStats(connection, uuid, playerName);
             DateContext context = currentContext();
             PlayerStats normalized = normalizeForCurrentPeriod(connection, stats, context);
@@ -188,8 +261,8 @@ public final class VoteService {
         for (CachedStats cached : statsCache.values()) {
             if (!cached.isExpired()) return cached.globalDaily();
         }
-        try {
-            return repo.readGlobalDailyVotes(repo.connection(), currentContext().dayKey());
+        try (Connection connection = repo.connection()) {
+            return repo.readGlobalDailyVotes(connection, currentContext().dayKey());
         } catch (SQLException exception) {
             plugin.getLogger().warning("Error leyendo votos globales: " + exception.getMessage());
             return 0;
@@ -202,7 +275,7 @@ public final class VoteService {
             if (currentValue < threshold) return threshold;
         }
 
-        // Si no hay más metas diarias, considerar metas global-recurring (start-after + every)
+        // Si no hay mÃ¡s metas diarias, considerar metas global-recurring (start-after + every)
         int recurringStart = config.globalRecurringStart();
         int recurringEvery = config.globalRecurringEvery();
         if (recurringStart > 0 && recurringEvery > 0) {
@@ -227,8 +300,8 @@ public final class VoteService {
         PluginConfig config = configService.get();
         if (!config.doubleSiteBonusEnabled() || uuid == null) return "";
         DateContext context = currentContext();
-        try {
-            int distinctSites = repo.countDistinctServicesToday(repo.connection(), uuid, context);
+        try (Connection connection = repo.connection()) {
+            int distinctSites = repo.countDistinctServicesToday(connection, uuid, context);
             if (distinctSites >= config.doubleSiteBonusRequiredSites()) return config.doubleSiteTodayIcon();
         } catch (SQLException exception) {
             plugin.getLogger().warning("Error leyendo placeholder double-site: " + exception.getMessage());
@@ -238,8 +311,8 @@ public final class VoteService {
 
     public void forceResetGlobalDaily() {
         DateContext context = currentContext();
-        try {
-            repo.updateGlobalState(repo.connection(), 0, context.dayKey());
+        try (Connection connection = repo.connection()) {
+            repo.updateGlobalState(connection, 0, context.dayKey());
             invalidateStatsCache();
         } catch (SQLException exception) {
             plugin.getLogger().warning("No se pudo reiniciar meta global diaria: " + exception.getMessage());
@@ -248,20 +321,80 @@ public final class VoteService {
 
     public double adjustGlobalDailyVotes(int delta) {
         DateContext context = currentContext();
-        Connection connection = null;
-        try {
-            connection = repo.connection();
+        PluginConfig config = configService.get();
+        List<Integer> globalDailyReached = new ArrayList<>();
+        List<Integer> recurringReached = new ArrayList<>();
+        Map<String, String> placeholders = new HashMap<>();
+        placeholders.put("player", "console");
+        placeholders.put("service", "admin");
+        try (Connection connection = repo.connection()) {
             connection.setAutoCommit(false);
-            GlobalState state = repo.fetchGlobalState(connection, context);
-            double updated = Math.max(0, state.dailyVotes() + delta);
-            repo.updateGlobalState(connection, updated, context.dayKey());
-            connection.commit();
-            connection.setAutoCommit(true);
-            return updated;
-        } catch (SQLException exception) {
-            if (connection != null) {
-                try { connection.rollback(); connection.setAutoCommit(true); } catch (SQLException ignored) {}
+            try {
+                GlobalState state = repo.fetchGlobalState(connection, context);
+                double previous = state.dailyVotes();
+                double updated = Math.max(0, state.dailyVotes() + delta);
+                repo.updateGlobalState(connection, updated, context.dayKey());
+
+                for (Map.Entry<Integer, List<String>> entry : config.globalDailyGoals().entrySet()) {
+                    if (updated >= entry.getKey()
+                            && repo.tryClaimGlobalGoal(connection, "global_daily", entry.getKey(), context.dayKey())) {
+                        globalDailyReached.add(entry.getKey());
+                    }
+                }
+
+                if (config.globalRecurringStart() > 0 && config.globalRecurringEvery() > 0 && !config.globalRecurringCommands().isEmpty()) {
+                    int start = config.globalRecurringStart() + config.globalRecurringEvery();
+                    int firstReached = Math.max(start, nextRecurringThresholdFromBase(
+                            (int) Math.floor(previous),
+                            config.globalRecurringStart(),
+                            config.globalRecurringEvery()
+                    ));
+                    int lastReached = (int) Math.floor(updated);
+                    for (int threshold = firstReached; threshold <= lastReached; threshold += config.globalRecurringEvery()) {
+                        if (repo.tryClaimGlobalGoal(connection, "global_recurring_" + config.globalRecurringEvery(), threshold, context.dayKey())) {
+                            recurringReached.add(threshold);
+                        }
+                    }
+                }
+
+                connection.commit();
+                connection.setAutoCommit(true);
+                statsCache.clear();
+
+                if (!globalDailyReached.isEmpty() || !recurringReached.isEmpty()) {
+                    Bukkit.getScheduler().runTask(plugin, () -> {
+                        for (Integer threshold : globalDailyReached) {
+                            Map<String, String> gp = new HashMap<>(placeholders);
+                            gp.put("goal", Integer.toString(threshold));
+                            gp.put("daily_global", formatDouble(updated));
+                            for (var line : messageService.messages("global-goal-completed-broadcast", gp)) {
+                                Bukkit.broadcast(line);
+                            }
+                            rewardExecutor.execute(config.globalDailyGoals().getOrDefault(threshold, List.of()), gp);
+                        }
+
+                        for (Integer threshold : recurringReached) {
+                            Map<String, String> rp = new HashMap<>(placeholders);
+                            rp.put("goal", Integer.toString(threshold));
+                            rp.put("daily_global", formatDouble(updated));
+                            for (var line : messageService.messages("global-recurring-goal-completed-broadcast", rp)) {
+                                Bukkit.broadcast(line);
+                            }
+                            rewardExecutor.execute(config.globalRecurringCommands(), rp);
+                        }
+
+                        if (!globalDailyReached.isEmpty() || !recurringReached.isEmpty()) {
+                            soundService.playToAll("goal.completed");
+                        }
+                    });
+                }
+                return updated;
+            } catch (SQLException exception) {
+                try { connection.rollback(); } catch (SQLException ignored) {}
+                try { connection.setAutoCommit(true); } catch (SQLException ignored) {}
+                throw exception;
             }
+        } catch (SQLException exception) {
             plugin.getLogger().warning("No se pudo ajustar contador global diario: " + exception.getMessage());
             return -1;
         }
@@ -270,8 +403,7 @@ public final class VoteService {
     public void forceResetPlayerMonthly(OfflinePlayer target) {
         if (target.getUniqueId() == null) return;
         DateContext context = currentContext();
-        try {
-            Connection connection = repo.connection();
+        try (Connection connection = repo.connection()) {
             PlayerStats stats = repo.fetchOrCreateStats(connection, target.getUniqueId(),
                     target.getName() == null ? target.getUniqueId().toString() : target.getName());
             repo.updatePlayerStats(connection, target.getUniqueId(), stats.name(),
@@ -288,22 +420,23 @@ public final class VoteService {
         UUID uuid = target.getUniqueId();
         String playerName = target.getName() == null ? uuid.toString() : target.getName();
         DateContext context = currentContext();
-        Connection connection = null;
-        try {
-            connection = repo.connection();
+        try (Connection connection = repo.connection()) {
             connection.setAutoCommit(false);
-            PlayerStats stats = normalizeForCurrentPeriod(connection, repo.fetchOrCreateStats(connection, uuid, playerName), context);
-            double updatedDaily = Math.max(0, stats.dailyVotes() + delta);
-            repo.updatePlayerStats(connection, uuid, playerName, stats.totalVotes(), updatedDaily,
-                    stats.monthlyVotes(), stats.streakMonthly(), context);
-            connection.commit();
-            connection.setAutoCommit(true);
-            statsCache.remove(uuid);
-            return updatedDaily;
-        } catch (SQLException exception) {
-            if (connection != null) {
-                try { connection.rollback(); connection.setAutoCommit(true); } catch (SQLException ignored) {}
+            try {
+                PlayerStats stats = normalizeForCurrentPeriod(connection, repo.fetchOrCreateStats(connection, uuid, playerName), context);
+                double updatedDaily = Math.max(0, stats.dailyVotes() + delta);
+                repo.updatePlayerStats(connection, uuid, playerName, stats.totalVotes(), updatedDaily,
+                        stats.monthlyVotes(), stats.streakMonthly(), context);
+                connection.commit();
+                connection.setAutoCommit(true);
+                statsCache.remove(uuid);
+                return updatedDaily;
+            } catch (SQLException exception) {
+                try { connection.rollback(); } catch (SQLException ignored) {}
+                try { connection.setAutoCommit(true); } catch (SQLException ignored) {}
+                throw exception;
             }
+        } catch (SQLException exception) {
             plugin.getLogger().warning("No se pudo ajustar contador diario de " + playerName + ": " + exception.getMessage());
             return -1;
         }
@@ -318,7 +451,7 @@ public final class VoteService {
         return formatDoubleStatic(value);
     }
 
-    // ── Core vote processing ──────────────────────────────────────────────────
+    // â”€â”€ Core vote processing â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     private void processVote(UUID uuid, String playerName, String serviceName, double amount, boolean executeVoteRewards) {
         if (amount <= 0) return;
@@ -335,8 +468,7 @@ public final class VoteService {
         boolean doubleSiteBonusCompleted = false;
         int highestMonthlyMilestone = 0;
 
-        try {
-            Connection connection = repo.connection();
+        try (Connection connection = repo.connection()) {
             connection.setAutoCommit(false);
             try {
                 PlayerStats stats = normalizeForCurrentPeriod(connection, repo.fetchOrCreateStats(connection, uuid, playerName), context);
@@ -397,7 +529,11 @@ public final class VoteService {
 
                 if (config.globalRecurringStart() > 0 && config.globalRecurringEvery() > 0 && !config.globalRecurringCommands().isEmpty()) {
                     int start = config.globalRecurringStart() + config.globalRecurringEvery();
-                    int firstReached = Math.max(start, nextRecurringThreshold((int) Math.floor(previousGlobalDaily), config.globalRecurringEvery()));
+                    int firstReached = Math.max(start, nextRecurringThresholdFromBase(
+                            (int) Math.floor(previousGlobalDaily),
+                            config.globalRecurringStart(),
+                            config.globalRecurringEvery()
+                    ));
                     int lastReached = (int) Math.floor(newGlobalDaily);
                     for (int threshold = firstReached; threshold <= lastReached; threshold += config.globalRecurringEvery()) {
                         if (repo.tryClaimGlobalGoal(connection, "global_recurring_" + config.globalRecurringEvery(), threshold, context.dayKey())) {
@@ -518,7 +654,7 @@ public final class VoteService {
         });
     }
 
-    // ── Stats normalization ───────────────────────────────────────────────────
+    // â”€â”€ Stats normalization â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     private PlayerStats normalizeForCurrentPeriod(Connection connection, PlayerStats stats, DateContext context) throws SQLException {
         double dailyVotes = stats.dailyVotes();
@@ -544,7 +680,7 @@ public final class VoteService {
         return Objects.equals(previousMonth, expectedPrevious.toString()) ? previousStreak + 1 : 1;
     }
 
-    // ── Placeholders ──────────────────────────────────────────────────────────
+    // â”€â”€ Placeholders â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     private void fillPlaceholders(Map<String, String> placeholders, UUID uuid, String playerName,
                                    String serviceName, double amount, double total, double daily,
@@ -563,7 +699,7 @@ public final class VoteService {
         placeholders.put("daily_global", formatDouble(globalDaily));
     }
 
-    // ── Utils ─────────────────────────────────────────────────────────────────
+    // â”€â”€ Utils â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     DateContext currentContext() {
         ZoneId zoneId = ZoneId.of(configService.get().timezone());
@@ -583,6 +719,16 @@ public final class VoteService {
         return mod == 0 ? value + step : value + (step - mod);
     }
 
+    private int nextRecurringThresholdFromBase(int currentValue, int startAfter, int step) {
+        int first = startAfter + step;
+        if (currentValue < first) {
+            return first;
+        }
+        int delta = currentValue - startAfter;
+        int mod = delta % step;
+        return mod == 0 ? currentValue + step : currentValue + (step - mod);
+    }
+
     private void runForcedServiceCommand(Player player, String serviceName) {
         List<String> commands = configService.get().forcedServiceCommands(serviceName);
         if (commands.isEmpty()) return;
@@ -595,9 +741,7 @@ public final class VoteService {
                         plugin.getLogger().info("Comando forzado ejecutado para " + player.getName() + " (" + serviceName + "): /" + command);
                         return;
                     }
-                    player.chat("/" + command);
-                    plugin.getLogger().info("Comando forzado fallback chat para " + player.getName() + " (" + serviceName + "): /" + command);
-                    return;
+                    plugin.getLogger().warning("Comando forzado no reconocido para " + player.getName() + " (" + serviceName + "): /" + command);
                 } catch (Exception exception) {
                     plugin.getLogger().warning("Fallo comando forzado para " + player.getName() + " (" + serviceName + "): /" + command + " -> " + exception.getMessage());
                 }
