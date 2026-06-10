@@ -57,10 +57,10 @@ public record PluginConfig(
                 "lp user <player> parent addtemp arcano 30d",
                 5,
                 true,
-                2,
-                "%player% &a¡Has votado en los 2 sitios y ganado Fly por 1 hora!",
+                3,
+                "%player% &a¡Has votado en los 3 sitios y ganado Fly por 1 hora!",
                 List.of("lp user %player% permission settemp protectionblocks.fly true 1h server=survival"),
-                "☁"
+                " ☁ "
         );
     }
 }

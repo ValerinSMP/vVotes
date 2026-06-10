@@ -43,20 +43,20 @@ public final class ConfigService {
         int monthlyDrawMinVotes = file.getInt("monthly-draw.min-votes", 1);
         String monthlyDrawRewardCommand = file.getString("monthly-draw.reward-command", "lp user <player> parent addtemp arcano 30d");
         int monthlyDrawAutoCheckMinutes = file.getInt("monthly-draw.auto-check-minutes", 5);
-        boolean doubleSiteBonusEnabled = file.getBoolean("double-site-bonus.enabled", true);
-        int doubleSiteBonusRequiredSites = Math.max(1, file.getInt("double-site-bonus.required-sites", 2));
+        boolean doubleSiteBonusEnabled = file.getBoolean("triple-site-bonus.enabled", true);
+        int doubleSiteBonusRequiredSites = Math.max(1, file.getInt("triple-site-bonus.required-sites", 3));
         String doubleSiteBonusMessage = file.getString(
-                "double-site-bonus.message",
-                "%player% &a¡Has votado en los 2 sitios y ganado Fly por 1 hora!"
+                "triple-site-bonus.message",
+                "%player% &a¡Has votado en los 3 sitios y ganado Fly por 1 hora!"
         );
-        List<String> doubleSiteBonusCommands = new ArrayList<>(file.getStringList("double-site-bonus.commands"));
+        List<String> doubleSiteBonusCommands = new ArrayList<>(file.getStringList("triple-site-bonus.commands"));
         if (doubleSiteBonusCommands.isEmpty()) {
-            String singleCommand = file.getString("double-site-bonus.command", "").trim();
+            String singleCommand = file.getString("triple-site-bonus.command", "").trim();
             if (!singleCommand.isBlank()) {
                 doubleSiteBonusCommands.add(singleCommand);
             }
         }
-        String doubleSiteTodayIcon = file.getString("double-site-bonus.placeholder-icon", "☁");
+        String doubleSiteTodayIcon = file.getString("triple-site-bonus.placeholder-icon", " ☁ ");
 
         this.config = new PluginConfig(
                 file.getString("storage.sqlite-file", "data/vvotes.db"),

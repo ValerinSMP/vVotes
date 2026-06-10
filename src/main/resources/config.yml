@@ -1,10 +1,10 @@
-double-site-bonus:
+triple-site-bonus:
   enabled: true
-  required-sites: 2
+  required-sites: 3
   placeholder-icon: ' ☁ '
-  message: '%prefix%&a¡Has votado en los 2 sitios y ganado Fly por 1 hora!'
+  message: '%prefix%&a¡Has votado en los 3 sitios y ganado Fly por 1 hora!'
   commands:
-  - lp user %player% permission settemp protectionblocks.fly true 1h server=survival
+  - voucher give %player% fly_1h 1
 
 storage:
   sqlite-file: data/vvotes.db
@@ -24,74 +24,78 @@ services:
 
 goals:
   global-daily:
-    '50':
-    - crate key giveall fire 1
     '75':
+    - crate key giveall fire 1
+    '115':
     - crate key giveall insane 1
-    '100':
+    '150':
     - crate key giveall legendary 1
-    '125':
-    - pp spawn spawn
+    '190':
+    - pa pinata start default default
   global-recurring:
-    start-after: 125
-    every: 15
+    start-after: 190
+    every: 25
     commands:
-    - pp spawn spawn
+    - pa pinata start default default
   player-monthly:
-    '4':
+    '6':
     - rec purse add <player> 10000
     - crate key give <player> vote 2
-    '8':
+    '12':
     - rec purse add <player> 12000
     - crate key give <player> vote 2
-    '12':
+    '18':
     - rec purse add <player> 14000
     - give <player> netherite_ingot 1
-    '16':
+    - recurrency give <player> 75 shards
+    '24':
     - rec purse add <player> 16000
     - crate key give <player> fire 1
-    '20':
+    '30':
     - rec purse add <player> 18000
     - crate key give <player> vote 3
-    '24':
+    '36':
     - rec purse add <player> 20000
     - give <player> enchanted_golden_apple 1
-    '28':
+    '42':
     - rec purse add <player> 22000
     - crate key give <player> fire 1
-    '32':
+    - recurrency give <player> 150 shards
+    '48':
     - rec purse add <player> 24000
     - crate key give <player> vote 3
     - give <player> netherite_ingot 1
-    '36':
+    '54':
     - rec purse add <player> 26000
     - crate key give <player> fire 1
-    '40':
+    '60':
     - rec purse add <player> 30000
     - crate key give <player> insane 1
     - give <player> enchanted_golden_apple 1
-    '44':
+    '66':
     - rec purse add <player> 32000
     - crate key give <player> vote 4
-    '48':
+    '72':
     - rec purse add <player> 36000
     - crate key give <player> fire 1
     - give <player> netherite_ingot 2
-    '52':
+    - recurrency give <player> 300 shards
+    '78':
     - rec purse add <player> 42000
     - give <player> enchanted_golden_apple 2
-    '56':
+    '84':
     - rec purse add <player> 50000
     - crate key give <player> fire 2
-    '60':
+    '90':
     - rec purse add <player> 70000
     - crate key give <player> insane 1
     - give <player> mace 1
 
 rewards:
   vote:
-  - rec purse add <player> 2500
+  - rec purse add <player> 5000
   - crate key give <player> vote 1
+  - recurrency give <player> 25 shards
   streak-monthly: []
 
 monthly-draw:
