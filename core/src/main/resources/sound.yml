@@ -1,0 +1,16 @@
+sounds:
+  vote:
+    # Sonido compartido: voto personal + anuncio global de voto.
+    announcement:
+      enabled: true
+      sound: BLOCK_RESPAWN_ANCHOR_CHARGE
+      volume: 0.35
+      pitch: 1.65
+
+  goal:
+    # Se reproduce cuando se completa una meta (global o personal).
+    completed:
+      enabled: true
+      sound: BLOCK_BEACON_ACTIVATE
+      volume: 0.55
+      pitch: 1.05

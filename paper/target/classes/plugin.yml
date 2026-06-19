@@ -1,0 +1,28 @@
+name: vVotes
+version: '1.0.0'
+main: com.valerinsmp.vvotes.paper.VVotesPaper
+api-version: '1.21'
+authors: [ValerinSMP]
+softdepend: [PlaceholderAPI, VotifierPlus]
+commands:
+  vote:
+    description: Ayuda del sistema de votos.
+    usage: /vote
+    permission: vvotes.use
+  votestats:
+    description: Muestra tus estadisticas de votos.
+    usage: /votestats
+    permission: vvotes.use
+  vvotes:
+    description: Configuracion personal de anuncios de votos.
+    usage: /vvotes toggle
+    permission: vvotes.use
+  voteadmin:
+    description: Administracion de vVotes.
+    usage: /voteadmin <reload|add|resetdaily|resetmonthly|adddaily|removedaily|addglobaldaily|removeglobaldaily|drawmonthly|drawhistory|topmonth>
+    permission: vvotes.admin
+permissions:
+  vvotes.use:
+    default: true
+  vvotes.admin:
+    default: op
