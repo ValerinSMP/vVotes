@@ -11,6 +11,8 @@ import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Player;
 
 import java.io.File;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -40,7 +42,23 @@ public final class MessageService {
 
     public void reload() {
         File file = new File(plugin.getDataFolder(), "messages.yml");
-        this.messages = YamlConfiguration.loadConfiguration(file);
+        try {
+            String raw = Files.readString(file.toPath(), StandardCharsets.UTF_8);
+            StringBuilder sanitized = new StringBuilder(raw.length());
+            for (int index = 0; index < raw.length(); index++) {
+                char character = raw.charAt(index);
+                if (character == '\n' || character == '\r' || character == '\t'
+                        || (!Character.isISOControl(character)
+                        && !(character >= 0x7F && character <= 0x9F))) {
+                    sanitized.append(character);
+                }
+            }
+            this.messages = new YamlConfiguration();
+            this.messages.loadFromString(sanitized.toString());
+        } catch (Exception exception) {
+            plugin.getLogger().severe("No se pudo cargar messages.yml: " + exception.getMessage());
+            this.messages = new YamlConfiguration();
+        }
     }
 
     public void send(CommandSender sender, String key) {

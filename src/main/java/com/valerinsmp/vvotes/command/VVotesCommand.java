@@ -17,13 +17,17 @@ public final class VVotesCommand implements CommandExecutor {
 
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
-        if (!(sender instanceof Player player)) {
-            plugin.getMessageService().send(sender, "player-only");
+        if (args.length == 0 || args[0].equalsIgnoreCase("help") || args[0].equalsIgnoreCase("ayuda")) {
+            plugin.getMessageService().send(sender, "vote-help");
+            return true;
+        }
+        if (args[0].equalsIgnoreCase("about") || args[0].equalsIgnoreCase("info")) {
+            plugin.getMessageService().send(sender, "about");
             return true;
         }
 
-        if (args.length == 0) {
-            plugin.getMessageService().send(player, "usage-vvotes");
+        if (!(sender instanceof Player player)) {
+            plugin.getMessageService().send(sender, "player-only");
             return true;
         }
 

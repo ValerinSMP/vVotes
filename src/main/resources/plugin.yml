@@ -1,5 +1,5 @@
 name: vVotes
-version: '1.0.0'
+version: '${version}'
 main: com.valerinsmp.vvotes.VVotesPlugin
 api-version: '1.21'
 authors: [ValerinSMP]
@@ -17,9 +17,10 @@ commands:
     description: Configuracion personal de anuncios de votos.
     usage: /vvotes toggle
     permission: vvotes.use
-  voteadmin:
+  vvotesadmin:
     description: Administracion de vVotes.
-    usage: /voteadmin <reload|add|resetdaily|resetmonthly|adddaily|removedaily|addglobaldaily|removeglobaldaily|drawmonthly|drawhistory|topmonth>
+    usage: /vvotesadmin <help|about|reload|add|resetdaily|resetmonthly|adddaily|removedaily|addglobaldaily|removeglobaldaily|drawmonthly|drawhistory|topmonth>
+    aliases: [voteadmin]
     permission: vvotes.admin
 permissions:
   vvotes.use:

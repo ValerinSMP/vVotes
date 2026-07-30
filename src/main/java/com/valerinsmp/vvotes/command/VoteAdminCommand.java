@@ -35,6 +35,8 @@ public final class VoteAdminCommand implements CommandExecutor, TabCompleter {
 
         String sub = args[0].toLowerCase();
         switch (sub) {
+            case "help", "ayuda" -> plugin.getMessageService().send(sender, "usage-voteadmin");
+            case "about", "info" -> plugin.getMessageService().send(sender, "about");
             case "reload" -> {
                 plugin.reloadPlugin();
                 plugin.getMessageService().send(sender, "reload-ok");

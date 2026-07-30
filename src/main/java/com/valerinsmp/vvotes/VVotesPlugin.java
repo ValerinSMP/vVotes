@@ -38,6 +38,9 @@ public final class VVotesPlugin extends JavaPlugin {
 
     @Override
     public void onEnable() {
+        long startedAt = System.nanoTime();
+        getLogger().info("Starting vVotes v" + getDescription().getVersion() + "...");
+        getLogger().info("Platform: Paper 1.21.11+ | Java 21 bytecode");
         saveDefaultConfig();
         saveResourceIfMissing("messages.yml");
         saveResourceIfMissing("sound.yml");
@@ -56,16 +59,22 @@ public final class VVotesPlugin extends JavaPlugin {
         registerListeners();
         registerPlaceholderExpansion();
         startMonthlyDrawTask();
+        long elapsedMs = (System.nanoTime() - startedAt) / 1_000_000L;
+        getLogger().info("Enabled successfully in " + elapsedMs + " ms.");
     }
 
     @Override
     public void onDisable() {
+        long startedAt = System.nanoTime();
+        getLogger().info("Stopping vVotes...");
         unregisterPlaceholderExpansion();
         stopMonthlyDrawTask();
         HandlerList.unregisterAll(this);
         if (databaseManager != null) {
             databaseManager.close();
         }
+        long elapsedMs = (System.nanoTime() - startedAt) / 1_000_000L;
+        getLogger().info("Disabled successfully in " + elapsedMs + " ms.");
     }
 
     public void reloadPlugin() {
@@ -119,7 +128,7 @@ public final class VVotesPlugin extends JavaPlugin {
             voteStats.setExecutor(new VoteStatsCommand(this));
         }
 
-        PluginCommand voteAdmin = getCommand("voteadmin");
+        PluginCommand voteAdmin = getCommand("vvotesadmin");
         if (voteAdmin != null) {
             VoteAdminCommand command = new VoteAdminCommand(this);
             voteAdmin.setExecutor(command);
@@ -133,7 +142,12 @@ public final class VVotesPlugin extends JavaPlugin {
     }
 
     private void registerListeners() {
-        getServer().getPluginManager().registerEvents(new VoteListener(this, voteService), this);
+        if (Bukkit.getPluginManager().isPluginEnabled("VotifierPlus")) {
+            getServer().getPluginManager().registerEvents(new VoteListener(this, voteService), this);
+            getLogger().info("Integration: VotifierPlus enabled.");
+        } else {
+            getLogger().info("Integration: VotifierPlus not present; vote events are disabled.");
+        }
     }
 
     private void registerPlaceholderExpansion() {
