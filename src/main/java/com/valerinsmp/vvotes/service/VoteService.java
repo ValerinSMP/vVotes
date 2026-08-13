@@ -3,759 +3,386 @@ package com.valerinsmp.vvotes.service;
 import com.valerinsmp.vvotes.VVotesPlugin;
 import com.valerinsmp.vvotes.config.ConfigService;
 import com.valerinsmp.vvotes.config.PluginConfig;
-import com.valerinsmp.vvotes.db.DatabaseManager;
 import com.valerinsmp.vvotes.model.PlayerStats;
-import com.valerinsmp.vvotes.reward.CommandRewardExecutor;
-import net.kyori.adventure.title.Title;
+import com.valerinsmp.vvotes.reward.GrantDispatcher;
 import org.bukkit.Bukkit;
 import org.bukkit.OfflinePlayer;
 import org.bukkit.entity.Player;
+import net.kyori.adventure.title.Title;
 
-import java.sql.Connection;
-import java.sql.SQLException;
 import java.time.Duration;
+
 import java.time.YearMonth;
 import java.time.ZoneId;
-import java.time.ZonedDateTime;
-import java.util.ArrayList;
-import java.util.HashMap;
+import java.time.LocalDate;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Objects;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
-public final class VoteService {
-
-    private static final long STATS_CACHE_TTL_MS = 5_000L;
-
+public final class VoteService implements AutoCloseable {
     private final VVotesPlugin plugin;
     private final ConfigService configService;
     private final MessageService messageService;
     private final SoundService soundService;
-    private final VoteRepository repo;
-    private final CommandRewardExecutor rewardExecutor;
-    final MonthlyDrawService monthlyDrawService;
-    private final Map<UUID, CachedStats> statsCache = new ConcurrentHashMap<>();
-    private final Map<UUID, Boolean> voteAnnouncementMuteCache = new ConcurrentHashMap<>();
+    private final VoteLedger ledger;
+    private final GrantDispatcher dispatcher;
+    private final ExecutorService writer;
+    private final VoteSnapshots snapshots = new VoteSnapshots();
+    private final java.util.Set<UUID> drainingPlayers = ConcurrentHashMap.newKeySet();
+    private final AtomicBoolean drainingGlobal = new AtomicBoolean();
+    private final AtomicBoolean accepting = new AtomicBoolean();
 
-    private record CachedStats(PlayerStats stats, double globalDaily, long expiresAt) {
-        boolean isExpired() { return System.currentTimeMillis() > expiresAt; }
-    }
-
-    public VoteService(
-            VVotesPlugin plugin,
-            ConfigService configService,
-            MessageService messageService,
-            SoundService soundService,
-            DatabaseManager database,
-            CommandRewardExecutor rewardExecutor
-    ) {
+    public VoteService(VVotesPlugin plugin, ConfigService configService, MessageService messageService,
+                       SoundService soundService, VoteLedger ledger, GrantDispatcher dispatcher) {
         this.plugin = plugin;
         this.configService = configService;
         this.messageService = messageService;
         this.soundService = soundService;
-        this.repo = new VoteRepository(database);
-        this.rewardExecutor = rewardExecutor;
-        this.monthlyDrawService = new MonthlyDrawService(plugin, configService, messageService, soundService, repo, rewardExecutor);
-    }
-
-    // â”€â”€ Public API â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-    public void handleVote(Player player, String serviceName) {
-        UUID uuid = player.getUniqueId();
-        String name = player.getName();
-        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
-            processVote(uuid, name, serviceName, 1.0, true);
-            statsCache.remove(uuid);
+        this.ledger = ledger;
+        this.dispatcher = dispatcher;
+        AtomicInteger sequence = new AtomicInteger();
+        this.writer = Executors.newSingleThreadExecutor(task -> {
+            Thread thread = new Thread(task, "vVotes-db-writer-" + sequence.incrementAndGet());
+            thread.setDaemon(true);
+            return thread;
         });
     }
 
-    public void enqueueOfflineVote(String playerName, String serviceName) {
-        if (playerName == null || playerName.isBlank()) {
-            return;
+    public void start() {
+        CompletableFuture.runAsync(() -> {
+            ledger.migrateLegacyPending(VotePlan.from(configService.get(), "legacy"));
+            snapshots.load(ledger.readAllStats(), ledger.readAllPreferences(), ledger.readGlobalDaily(), currentDay());
+        }, writer).join();
+        accepting.set(true);
+        drainGlobalGrants();
+    }
+
+    /** Called on main after VoteListener captured provider primitives and resolved exact identity. */
+    public void ingestProviderEvent(VoteEnvelope event, PlayerIdentity identity) {
+        requireMainThread();
+        if (!accepting.get()) return;
+        PluginConfig config = configService.get();
+        boolean allowTestVote = config.processTestVotes();
+        VoteEnvelope acceptedEvent = applyProviderPolicy(event, allowTestVote);
+        VotePlan plan = VotePlan.from(config, event.normalizedService());
+        CompletableFuture.supplyAsync(() -> ledger.accept(acceptedEvent, identity, plan), writer)
+                .thenAccept(result -> afterIngest(result, event, identity));
+    }
+
+    /** Called on main from PlayerJoinEvent with exact UUID/name primitives. */
+    public void resolvePending(PlayerIdentity identity) {
+        requireMainThread();
+        if (!accepting.get()) return;
+        CompletableFuture.supplyAsync(() -> ledger.resolvePending(identity), writer).thenAccept(results -> {
+            refreshSnapshot(identity);
+            if (!results.isEmpty()) {
+                scheduleMain(() -> {
+                    for (VoteEventResult result : results) notifyAccepted(identity, result);
+                    Player exact = Bukkit.getPlayerExact(identity.exactName());
+                    if (exact != null && exact.isOnline() && exact.getUniqueId().equals(identity.uuid())) {
+                        messageService.send(exact, "vote-pending-delivered",
+                                Map.of("amount", Integer.toString(results.size())));
+                    }
+                });
+            }
+            drainPlayerGrants(identity.uuid());
+            drainGlobalGrants();
+        });
+    }
+
+    public CompletableFuture<Integer> addManualVotes(OfflinePlayer target, int amount) {
+        if (target == null || target.getUniqueId() == null || target.getName() == null || amount <= 0) {
+            return CompletableFuture.completedFuture(0);
         }
-        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
-            try (Connection connection = repo.connection()) {
-                repo.insertPendingVote(connection, playerName, serviceName == null ? "unknown" : serviceName);
-            } catch (SQLException exception) {
-                plugin.getLogger().warning("No se pudo guardar voto pendiente de " + playerName + ": " + exception.getMessage());
+        PlayerIdentity identity = new PlayerIdentity(target.getUniqueId(), target.getName());
+        VotePlan plan = VotePlan.from(configService.get(), "manual").withoutVoteCommands();
+        return CompletableFuture.supplyAsync(() -> {
+            int planned = 0;
+            for (int i = 0; i < amount; i++) {
+                if (ledger.accept(VoteEnvelope.manual(identity, System.currentTimeMillis() / 1000L, UUID.randomUUID()),
+                        identity, plan).state() == VoteEventState.PLANNED) planned++;
             }
+            refreshSnapshot(identity);
+            return planned;
+        }, writer).thenApply(planned -> {
+            drainPlayerGrants(identity.uuid());
+            drainGlobalGrants();
+            return planned;
         });
-    }
-
-    public void processPendingVotes(Player player) {
-        if (player == null) {
-            return;
-        }
-        UUID uuid = player.getUniqueId();
-        String playerName = player.getName();
-        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
-            List<VoteRepository.PendingVoteRow> rows;
-            try (Connection connection = repo.connection()) {
-                rows = repo.fetchPendingVotes(connection, playerName);
-            } catch (SQLException exception) {
-                plugin.getLogger().warning("No se pudieron leer votos pendientes de " + playerName + ": " + exception.getMessage());
-                return;
-            }
-            if (rows.isEmpty()) {
-                return;
-            }
-            for (VoteRepository.PendingVoteRow row : rows) {
-                processVote(uuid, playerName, row.serviceName(), 1.0, true);
-                try (Connection connection = repo.connection()) {
-                    repo.deletePendingVote(connection, row.id());
-                } catch (SQLException exception) {
-                    plugin.getLogger().warning("No se pudo eliminar voto pendiente id=" + row.id() + ": " + exception.getMessage());
-                }
-            }
-            statsCache.remove(uuid);
-            Bukkit.getScheduler().runTask(plugin, () -> {
-                Player online = Bukkit.getPlayer(uuid);
-                if (online != null && online.isOnline()) {
-                    plugin.getMessageService().send(online, "vote-pending-delivered", Map.of("amount", Integer.toString(rows.size())));
-                }
-            });
-        });
-    }
-
-    public void addManualVotes(OfflinePlayer target, int amount) {
-        if (amount <= 0 || target.getUniqueId() == null) return;
-        String name = target.getName() == null ? target.getUniqueId().toString() : target.getName();
-        processVote(target.getUniqueId(), name, "manual", amount, false);
     }
 
     public CompletableFuture<Double> adjustGlobalDailyVotesAsync(int delta) {
-        return CompletableFuture.supplyAsync(() -> adjustGlobalDailyVotes(delta), r -> Bukkit.getScheduler().runTaskAsynchronously(plugin, r));
+        return CompletableFuture.supplyAsync(() -> {
+            double updated = ledger.adjustGlobalDaily(delta);
+            snapshots.setGlobal(Math.max(0, updated), currentDay());
+            return updated;
+        }, writer);
     }
 
     public CompletableFuture<Double> adjustPlayerDailyVotesAsync(OfflinePlayer target, int delta) {
-        return CompletableFuture.supplyAsync(() -> adjustPlayerDailyVotes(target, delta), r -> Bukkit.getScheduler().runTaskAsynchronously(plugin, r));
+        if (target == null || target.getUniqueId() == null || target.getName() == null) return CompletableFuture.completedFuture(-1D);
+        PlayerIdentity identity = new PlayerIdentity(target.getUniqueId(), target.getName());
+        return CompletableFuture.supplyAsync(() -> {
+            double updated = ledger.adjustPlayerDaily(identity, delta);
+            refreshSnapshot(identity);
+            return updated;
+        }, writer);
     }
 
     public CompletableFuture<Void> forceResetGlobalDailyAsync() {
-        return CompletableFuture.runAsync(this::forceResetGlobalDaily, r -> Bukkit.getScheduler().runTaskAsynchronously(plugin, r));
+        return CompletableFuture.runAsync(() -> {
+            ledger.resetGlobalDaily();
+            snapshots.setGlobal(0, currentDay());
+        }, writer);
     }
 
     public CompletableFuture<Void> forceResetPlayerMonthlyAsync(OfflinePlayer target) {
-        return CompletableFuture.runAsync(() -> forceResetPlayerMonthly(target), r -> Bukkit.getScheduler().runTaskAsynchronously(plugin, r));
+        if (target == null || target.getUniqueId() == null || target.getName() == null) return CompletableFuture.completedFuture(null);
+        PlayerIdentity identity = new PlayerIdentity(target.getUniqueId(), target.getName());
+        return CompletableFuture.runAsync(() -> {
+            ledger.resetPlayerMonthly(identity);
+            refreshSnapshot(identity);
+        }, writer);
     }
 
     public CompletableFuture<MonthlyDrawResult> drawMonthlyAsync(String monthKey, String executedBy) {
-        return CompletableFuture.supplyAsync(() -> drawMonthly(monthKey, executedBy), r -> Bukkit.getScheduler().runTaskAsynchronously(plugin, r));
-    }
-
-    public CompletableFuture<DrawHistoryResult> getDrawHistoryAsync(String monthKey) {
-        return CompletableFuture.supplyAsync(() -> getDrawHistory(monthKey), r -> Bukkit.getScheduler().runTaskAsynchronously(plugin, r));
-    }
-
-    public CompletableFuture<List<TopMonthEntry>> getTopMonthAsync(String monthKey, int limit) {
-        return CompletableFuture.supplyAsync(() -> getTopMonth(monthKey, limit), r -> Bukkit.getScheduler().runTaskAsynchronously(plugin, r));
-    }
-
-    public MonthlyDrawResult runAutoMonthlyDrawIfNeeded() {
-        return monthlyDrawService.runAutoIfNeeded();
-    }
-
-    public MonthlyDrawResult drawMonthly(String monthKey, String executedBy) {
-        return monthlyDrawService.draw(monthKey, executedBy);
-    }
-
-    public DrawHistoryResult getDrawHistory(String monthKey) {
-        return monthlyDrawService.getHistory(monthKey);
-    }
-
-    public List<TopMonthEntry> getTopMonth(String monthKey, int limit) {
-        return monthlyDrawService.getTopMonth(monthKey, limit);
-    }
-
-    public void invalidateStatsCache() {
-        statsCache.clear();
-    }
-
-    public boolean toggleVoteAnnouncements(UUID uuid, String playerName) {
-        if (uuid == null) {
-            return false;
-        }
-        String safeName = (playerName == null || playerName.isBlank()) ? uuid.toString() : playerName;
-        try (Connection connection = repo.connection()) {
-            repo.fetchOrCreateStats(connection, uuid, safeName);
-            boolean currentlyMuted = repo.isVoteAnnouncementMuted(connection, uuid);
-            boolean updated = !currentlyMuted;
-            repo.setVoteAnnouncementMuted(connection, uuid, updated);
-            voteAnnouncementMuteCache.put(uuid, updated);
-            return updated;
-        } catch (SQLException exception) {
-            plugin.getLogger().warning("No se pudo cambiar la preferencia de anuncios de voto para " + safeName + ": " + exception.getMessage());
-            return false;
-        }
-    }
-
-    public boolean isVoteAnnouncementMuted(UUID uuid, String playerName) {
-        if (uuid == null) {
-            return false;
-        }
-        Boolean cached = voteAnnouncementMuteCache.get(uuid);
-        if (cached != null) {
-            return cached;
-        }
-        String safeName = (playerName == null || playerName.isBlank()) ? uuid.toString() : playerName;
-        try (Connection connection = repo.connection()) {
-            repo.fetchOrCreateStats(connection, uuid, safeName);
-            boolean muted = repo.isVoteAnnouncementMuted(connection, uuid);
-            voteAnnouncementMuteCache.put(uuid, muted);
-            return muted;
-        } catch (SQLException exception) {
-            plugin.getLogger().warning("No se pudo leer la preferencia de anuncios de voto para " + safeName + ": " + exception.getMessage());
-            return false;
-        }
-    }
-
-    public void sealGoalsForCurrentDay() {
-        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
-            try (Connection connection = repo.connection()) {
-                DateContext context = currentContext();
-                double globalDaily = repo.readGlobalDailyVotes(connection, context.dayKey());
-                PluginConfig config = configService.get();
-
-                for (int threshold : config.globalDailyGoals().keySet()) {
-                    if (globalDaily >= threshold) {
-                        repo.tryClaimGlobalGoal(connection, "global_daily", threshold, context.dayKey());
+        String key = monthKey == null || monthKey.isBlank()
+                ? YearMonth.now(ZoneId.of(configService.get().timezone())).minusMonths(1).toString() : monthKey;
+        if (!configService.get().monthlyDrawEnabled()) return CompletableFuture.completedFuture(MonthlyDrawResult.disabled());
+        PluginConfig config = configService.get();
+        String command = config.monthlyDrawRewardCommand();
+        return CompletableFuture.supplyAsync(() -> ledger.planMonthlyDraw(key, executedBy,
+                config.monthlyDrawMinVotes(), command,
+                bound -> java.util.concurrent.ThreadLocalRandom.current().nextInt(bound)), writer).thenApply(result -> {
+            if (result.status() == MonthlyDrawResult.Status.SUCCESS) {
+                scheduleMain(() -> {
+                    Map<String, String> placeholders = Map.of("month", result.monthKey(),
+                            "player", result.winnerName(), "votes", formatDouble(result.topVotes()),
+                            "candidates", Integer.toString(result.candidatesCount()));
+                    for (Player online : Bukkit.getOnlinePlayers()) {
+                        messageService.send(online, "draw-monthly-winner-broadcast", placeholders);
                     }
-                }
-                if (config.globalRecurringStart() > 0 && config.globalRecurringEvery() > 0) {
-                    int start = config.globalRecurringStart() + config.globalRecurringEvery();
-                    for (int t = start; t <= (int) Math.floor(globalDaily); t += config.globalRecurringEvery()) {
-                        repo.tryClaimGlobalGoal(connection, "global_recurring_" + config.globalRecurringEvery(), t, context.dayKey());
-                    }
-                }
-            } catch (SQLException exception) {
-                plugin.getLogger().warning("Error sellando metas del dia: " + exception.getMessage());
+                    soundService.playToAll("goal.completed");
+                });
+                drainGlobalGrants();
             }
+            return result;
         });
     }
 
-    public String getTimezoneId() {
-        return configService.get().timezone();
+    public CompletableFuture<DrawHistoryResult> getDrawHistoryAsync(String monthKey) {
+        String key = monthKey == null || monthKey.isBlank()
+                ? YearMonth.now(ZoneId.of(configService.get().timezone())).minusMonths(1).toString() : monthKey;
+        return CompletableFuture.supplyAsync(() -> ledger.readDrawHistory(key), writer);
+    }
+
+    public CompletableFuture<List<TopMonthEntry>> getTopMonthAsync(String monthKey, int limit) {
+        return CompletableFuture.supplyAsync(() -> ledger.readTopMonth(monthKey, limit), writer);
+    }
+
+    public CompletableFuture<Boolean> toggleVoteAnnouncementsAsync(UUID uuid) {
+        return CompletableFuture.supplyAsync(() -> {
+            boolean muted = ledger.togglePreference(uuid);
+            snapshots.setMuted(uuid, muted);
+            return muted;
+        }, writer);
     }
 
     public PlayerStats getStats(UUID uuid, String playerName) {
-        CachedStats cached = statsCache.get(uuid);
-        if (cached != null && !cached.isExpired()) return cached.stats();
-        try (Connection connection = repo.connection()) {
-            PlayerStats stats = repo.fetchOrCreateStats(connection, uuid, playerName);
-            DateContext context = currentContext();
-            PlayerStats normalized = normalizeForCurrentPeriod(connection, stats, context);
-            double globalDaily = repo.readGlobalDailyVotes(connection, context.dayKey());
-            statsCache.put(uuid, new CachedStats(normalized, globalDaily, System.currentTimeMillis() + STATS_CACHE_TTL_MS));
-            return normalized;
-        } catch (SQLException exception) {
-            plugin.getLogger().warning("Error obteniendo stats: " + exception.getMessage());
-            return PlayerStats.empty(uuid, playerName);
-        }
+        return snapshots.stats(uuid, playerName, currentDay(), currentMonth());
     }
 
-    public double getGlobalDailyVotes() {
-        for (CachedStats cached : statsCache.values()) {
-            if (!cached.isExpired()) return cached.globalDaily();
-        }
-        try (Connection connection = repo.connection()) {
-            return repo.readGlobalDailyVotes(connection, currentContext().dayKey());
-        } catch (SQLException exception) {
-            plugin.getLogger().warning("Error leyendo votos globales: " + exception.getMessage());
-            return 0;
-        }
-    }
+    public double getGlobalDailyVotes() { return snapshots.global(currentDay()); }
+    public boolean isVoteAnnouncementMuted(UUID uuid, String ignoredName) { return snapshots.muted(uuid); }
 
     public int nextGlobalGoal(double currentValue) {
         PluginConfig config = configService.get();
-        for (Integer threshold : config.globalDailyGoals().keySet()) {
-            if (currentValue < threshold) return threshold;
-        }
-
-        // Si no hay mÃ¡s metas diarias, considerar metas global-recurring (start-after + every)
-        int recurringStart = config.globalRecurringStart();
-        int recurringEvery = config.globalRecurringEvery();
-        if (recurringStart > 0 && recurringEvery > 0) {
-            int first = recurringStart + recurringEvery;
+        for (Integer threshold : config.globalDailyGoals().keySet()) if (currentValue < threshold) return threshold;
+        int start = config.globalRecurringStart();
+        int every = config.globalRecurringEvery();
+        if (start > 0 && every > 0) {
+            int first = start + every;
             if (currentValue < first) return first;
-            int relative = (int) Math.floor(currentValue) - recurringStart;
-            int nextRel = nextRecurringThreshold(relative, recurringEvery);
-            return recurringStart + nextRel;
+            int relative = (int) Math.floor(currentValue) - start;
+            int mod = relative % every;
+            return start + (mod == 0 ? relative + every : relative + every - mod);
         }
-
         return -1;
     }
 
     public int nextMonthlyGoal(double currentValue) {
-        for (Integer threshold : configService.get().playerMonthlyGoals().keySet()) {
-            if (currentValue < threshold) return threshold;
-        }
+        for (Integer threshold : configService.get().playerMonthlyGoals().keySet()) if (currentValue < threshold) return threshold;
         return -1;
     }
 
     public String getDoubleSiteTodayIcon(UUID uuid) {
-        PluginConfig config = configService.get();
-        if (!config.doubleSiteBonusEnabled() || uuid == null) return "";
-        DateContext context = currentContext();
-        try (Connection connection = repo.connection()) {
-            int distinctSites = repo.countDistinctServicesToday(connection, uuid, context);
-            if (distinctSites >= config.doubleSiteBonusRequiredSites()) return config.doubleSiteTodayIcon();
-        } catch (SQLException exception) {
-            plugin.getLogger().warning("Error leyendo placeholder double-site: " + exception.getMessage());
-        }
-        return "";
+        return snapshots.triple(uuid, currentDay())
+                ? configService.get().doubleSiteTodayIcon() : "";
     }
 
-    public void forceResetGlobalDaily() {
-        DateContext context = currentContext();
-        try (Connection connection = repo.connection()) {
-            repo.updateGlobalState(connection, 0, context.dayKey());
-            invalidateStatsCache();
-        } catch (SQLException exception) {
-            plugin.getLogger().warning("No se pudo reiniciar meta global diaria: " + exception.getMessage());
-        }
+    public String getTimezoneId() { return configService.get().timezone(); }
+    public CompletableFuture<List<GrantClaim>> getAmbiguousGrantsAsync() {
+        return CompletableFuture.supplyAsync(ledger::listAmbiguous, writer);
     }
-
-    public double adjustGlobalDailyVotes(int delta) {
-        DateContext context = currentContext();
-        PluginConfig config = configService.get();
-        List<Integer> globalDailyReached = new ArrayList<>();
-        List<Integer> recurringReached = new ArrayList<>();
-        Map<String, String> placeholders = new HashMap<>();
-        placeholders.put("player", "console");
-        placeholders.put("service", "admin");
-        try (Connection connection = repo.connection()) {
-            connection.setAutoCommit(false);
-            try {
-                GlobalState state = repo.fetchGlobalState(connection, context);
-                double previous = state.dailyVotes();
-                double updated = Math.max(0, state.dailyVotes() + delta);
-                repo.updateGlobalState(connection, updated, context.dayKey());
-
-                for (Map.Entry<Integer, List<String>> entry : config.globalDailyGoals().entrySet()) {
-                    if (updated >= entry.getKey()
-                            && repo.tryClaimGlobalGoal(connection, "global_daily", entry.getKey(), context.dayKey())) {
-                        globalDailyReached.add(entry.getKey());
-                    }
-                }
-
-                if (config.globalRecurringStart() > 0 && config.globalRecurringEvery() > 0 && !config.globalRecurringCommands().isEmpty()) {
-                    int start = config.globalRecurringStart() + config.globalRecurringEvery();
-                    int firstReached = Math.max(start, nextRecurringThresholdFromBase(
-                            (int) Math.floor(previous),
-                            config.globalRecurringStart(),
-                            config.globalRecurringEvery()
-                    ));
-                    int lastReached = (int) Math.floor(updated);
-                    for (int threshold = firstReached; threshold <= lastReached; threshold += config.globalRecurringEvery()) {
-                        if (repo.tryClaimGlobalGoal(connection, "global_recurring_" + config.globalRecurringEvery(), threshold, context.dayKey())) {
-                            recurringReached.add(threshold);
-                        }
-                    }
-                }
-
-                connection.commit();
-                connection.setAutoCommit(true);
-                statsCache.clear();
-
-                if (!globalDailyReached.isEmpty() || !recurringReached.isEmpty()) {
-                    Bukkit.getScheduler().runTask(plugin, () -> {
-                        for (Integer threshold : globalDailyReached) {
-                            Map<String, String> gp = new HashMap<>(placeholders);
-                            gp.put("goal", Integer.toString(threshold));
-                            gp.put("daily_global", formatDouble(updated));
-                            for (var line : messageService.messages("global-goal-completed-broadcast", gp)) {
-                                Bukkit.broadcast(line);
-                            }
-                            rewardExecutor.execute(config.globalDailyGoals().getOrDefault(threshold, List.of()), gp);
-                        }
-
-                        for (Integer threshold : recurringReached) {
-                            Map<String, String> rp = new HashMap<>(placeholders);
-                            rp.put("goal", Integer.toString(threshold));
-                            rp.put("daily_global", formatDouble(updated));
-                            for (var line : messageService.messages("global-recurring-goal-completed-broadcast", rp)) {
-                                Bukkit.broadcast(line);
-                            }
-                            rewardExecutor.execute(config.globalRecurringCommands(), rp);
-                        }
-
-                        if (!globalDailyReached.isEmpty() || !recurringReached.isEmpty()) {
-                            soundService.playToAll("goal.completed");
-                        }
-                    });
-                }
-                return updated;
-            } catch (SQLException exception) {
-                try { connection.rollback(); } catch (SQLException ignored) {}
-                try { connection.setAutoCommit(true); } catch (SQLException ignored) {}
-                throw exception;
-            }
-        } catch (SQLException exception) {
-            plugin.getLogger().warning("No se pudo ajustar contador global diario: " + exception.getMessage());
-            return -1;
-        }
-    }
-
-    public void forceResetPlayerMonthly(OfflinePlayer target) {
-        if (target.getUniqueId() == null) return;
-        DateContext context = currentContext();
-        try (Connection connection = repo.connection()) {
-            PlayerStats stats = repo.fetchOrCreateStats(connection, target.getUniqueId(),
-                    target.getName() == null ? target.getUniqueId().toString() : target.getName());
-            repo.updatePlayerStats(connection, target.getUniqueId(), stats.name(),
-                    stats.totalVotes(), stats.dailyVotes(), 0, stats.streakMonthly(),
-                    stats.lastVoteDay(), context.monthKey(), stats.lastVoteEpoch());
-            statsCache.remove(target.getUniqueId());
-        } catch (SQLException exception) {
-            plugin.getLogger().warning("No se pudo reiniciar mensual de " + target.getName() + ": " + exception.getMessage());
-        }
-    }
-
-    public double adjustPlayerDailyVotes(OfflinePlayer target, int delta) {
-        if (target.getUniqueId() == null) return -1;
-        UUID uuid = target.getUniqueId();
-        String playerName = target.getName() == null ? uuid.toString() : target.getName();
-        DateContext context = currentContext();
-        try (Connection connection = repo.connection()) {
-            connection.setAutoCommit(false);
-            try {
-                PlayerStats stats = normalizeForCurrentPeriod(connection, repo.fetchOrCreateStats(connection, uuid, playerName), context);
-                double updatedDaily = Math.max(0, stats.dailyVotes() + delta);
-                repo.updatePlayerStats(connection, uuid, playerName, stats.totalVotes(), updatedDaily,
-                        stats.monthlyVotes(), stats.streakMonthly(), context);
-                connection.commit();
-                connection.setAutoCommit(true);
-                statsCache.remove(uuid);
-                return updatedDaily;
-            } catch (SQLException exception) {
-                try { connection.rollback(); } catch (SQLException ignored) {}
-                try { connection.setAutoCommit(true); } catch (SQLException ignored) {}
-                throw exception;
-            }
-        } catch (SQLException exception) {
-            plugin.getLogger().warning("No se pudo ajustar contador diario de " + playerName + ": " + exception.getMessage());
-            return -1;
-        }
-    }
-
     public static String formatDoubleStatic(double value) {
         if (value == Math.floor(value)) return String.format(Locale.US, "%.0f", value);
         return String.format(Locale.US, "%.2f", value);
     }
 
-    public String formatDouble(double value) {
-        return formatDoubleStatic(value);
-    }
+    public String formatDouble(double value) { return formatDoubleStatic(value); }
 
-    // â”€â”€ Core vote processing â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-    private void processVote(UUID uuid, String playerName, String serviceName, double amount, boolean executeVoteRewards) {
-        if (amount <= 0) return;
-
-        PluginConfig config = configService.get();
-        DateContext context = currentContext();
-        List<List<String>> pendingCommands = new ArrayList<>();
-        List<Integer> recurringReached = new ArrayList<>();
-        List<Integer> globalDailyReached = new ArrayList<>();
-        List<Integer> monthlyGoalsReached = new ArrayList<>();
-        Map<String, String> placeholders = new HashMap<>();
-        boolean playerGoalCompleted = false;
-        boolean globalGoalCompleted = false;
-        boolean doubleSiteBonusCompleted = false;
-        int highestMonthlyMilestone = 0;
-
-        try (Connection connection = repo.connection()) {
-            connection.setAutoCommit(false);
-            try {
-                PlayerStats stats = normalizeForCurrentPeriod(connection, repo.fetchOrCreateStats(connection, uuid, playerName), context);
-
-                long secondsSinceLast = stats.lastVoteEpoch() <= 0 ? Long.MAX_VALUE : context.epochSeconds() - stats.lastVoteEpoch();
-                if (secondsSinceLast <= config.suspiciousWindowSeconds()) {
-                    plugin.getLogger().warning("Voto sospechoso detectado: " + playerName + " servicio=" + serviceName + " diff=" + secondsSinceLast + "s");
-                }
-
-                int streakMonthly = computeMonthlyStreak(stats.streakMonthly(), stats.lastMonthKey(), context.monthKey());
-                double newTotal = stats.totalVotes() + amount;
-                double newDaily = stats.dailyVotes() + amount;
-                double newMonthly = stats.monthlyVotes() + amount;
-
-                repo.updatePlayerStats(connection, uuid, playerName, newTotal, newDaily, newMonthly, streakMonthly, context);
-                repo.upsertMonthlySnapshot(connection, uuid, playerName, context.monthKey(), newMonthly, context.epochSeconds());
-
-                GlobalState globalState = repo.fetchGlobalState(connection, context);
-                double previousGlobalDaily = globalState.dailyVotes();
-                double newGlobalDaily = globalState.dailyVotes() + amount;
-                repo.updateGlobalState(connection, newGlobalDaily, context.dayKey());
-
-                repo.insertVoteLog(connection, uuid, playerName, serviceName, amount, amount);
-                fillPlaceholders(placeholders, uuid, playerName, serviceName, amount, newTotal, newDaily, newMonthly, streakMonthly, newGlobalDaily);
-
-                if (executeVoteRewards && config.doubleSiteBonusEnabled()) {
-                    int distinctSites = repo.countDistinctServicesToday(connection, uuid, context);
-                    placeholders.put("double_site_today_count", Integer.toString(distinctSites));
-                    if (distinctSites >= config.doubleSiteBonusRequiredSites()
-                            && repo.tryClaimPlayerGoal(connection, uuid, "double_site_daily", config.doubleSiteBonusRequiredSites(), context.dayKey())) {
-                        pendingCommands.add(config.doubleSiteBonusCommands());
-                        doubleSiteBonusCompleted = true;
-                    }
-                }
-
-                if (executeVoteRewards) pendingCommands.add(config.voteRewards());
-
-                for (Map.Entry<Integer, List<String>> entry : config.monthlyStreakRewards().entrySet()) {
-                    if (streakMonthly == entry.getKey()) pendingCommands.add(entry.getValue());
-                }
-
-                for (Map.Entry<Integer, List<String>> entry : config.playerMonthlyGoals().entrySet()) {
-                    if (newMonthly >= entry.getKey() && repo.tryClaimPlayerGoal(connection, uuid, "monthly", entry.getKey(), context.monthKey())) {
-                        pendingCommands.add(entry.getValue());
-                        monthlyGoalsReached.add(entry.getKey());
-                        playerGoalCompleted = true;
-                        if (entry.getKey() > highestMonthlyMilestone) highestMonthlyMilestone = entry.getKey();
-                    }
-                }
-
-                for (Map.Entry<Integer, List<String>> entry : config.globalDailyGoals().entrySet()) {
-                    if (newGlobalDaily >= entry.getKey() && repo.tryClaimGlobalGoal(connection, "global_daily", entry.getKey(), context.dayKey())) {
-                        pendingCommands.add(entry.getValue());
-                        globalDailyReached.add(entry.getKey());
-                        globalGoalCompleted = true;
-                    }
-                }
-
-                if (config.globalRecurringStart() > 0 && config.globalRecurringEvery() > 0 && !config.globalRecurringCommands().isEmpty()) {
-                    int start = config.globalRecurringStart() + config.globalRecurringEvery();
-                    int firstReached = Math.max(start, nextRecurringThresholdFromBase(
-                            (int) Math.floor(previousGlobalDaily),
-                            config.globalRecurringStart(),
-                            config.globalRecurringEvery()
-                    ));
-                    int lastReached = (int) Math.floor(newGlobalDaily);
-                    for (int threshold = firstReached; threshold <= lastReached; threshold += config.globalRecurringEvery()) {
-                        if (repo.tryClaimGlobalGoal(connection, "global_recurring_" + config.globalRecurringEvery(), threshold, context.dayKey())) {
-                            recurringReached.add(threshold);
-                            globalGoalCompleted = true;
-                        }
-                    }
-                }
-
-                connection.commit();
-                connection.setAutoCommit(true);
-            } catch (SQLException exception) {
-                connection.rollback();
-                connection.setAutoCommit(true);
-                throw exception;
-            }
-        } catch (SQLException exception) {
-            plugin.getLogger().severe("Error procesando voto de " + playerName + ": " + exception.getMessage());
-            return;
+    @Override
+    public void close() {
+        stopAccepting();
+        writer.shutdown();
+        try {
+            if (!writer.awaitTermination(10, TimeUnit.SECONDS)) plugin.getLogger().warning("DB writer did not stop cleanly");
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
         }
+        ledger.close();
+    }
 
-        if (highestMonthlyMilestone > 0) {
-            placeholders.put("monthly_milestone", Integer.toString(highestMonthlyMilestone));
-            placeholders.put("monthly_bonus", messageService.text("monthly-bonus-inline", placeholders));
-        } else {
-            placeholders.put("monthly_bonus", "");
+    public void stopAccepting() {
+        accepting.set(false);
+    }
+
+    private void afterIngest(VoteEventResult result, VoteEnvelope event, PlayerIdentity identity) {
+        if (identity != null) refreshSnapshot(identity);
+        if (result.state() == VoteEventState.PLANNED && identity != null) {
+            scheduleMain(() -> notifyAccepted(identity, result));
         }
-        placeholders.put("double_site_bonus", doubleSiteBonusCompleted
-                ? messageService.text("double-site-bonus-inline", placeholders) : "");
-
-        deliverNotificationsAndRewards(uuid, serviceName, config, placeholders,
-            pendingCommands, recurringReached, globalDailyReached, monthlyGoalsReached,
-            playerGoalCompleted, globalGoalCompleted, doubleSiteBonusCompleted);
+        if (identity != null) drainPlayerGrants(identity.uuid());
+        drainGlobalGrants();
+        if (result.state() == VoteEventState.QUARANTINED) {
+            plugin.getLogger().warning("Provider vote quarantined: event=" + shortId(event.eventHash()));
+        }
     }
 
-    private void deliverNotificationsAndRewards(
-            UUID uuid, String serviceName, PluginConfig config,
-            Map<String, String> placeholders, List<List<String>> pendingCommands,
-            List<Integer> recurringReached, List<Integer> globalDailyReached, List<Integer> monthlyGoalsReached,
-            boolean playerGoalCompleted,
-            boolean globalGoalCompleted, boolean doubleSiteBonusCompleted
-    ) {
-        Bukkit.getScheduler().runTask(plugin, () -> {
-            if (config.broadcastOnVote()) {
-                Player voter = Bukkit.getPlayer(uuid);
-                for (var line : messageService.messages("vote-broadcast", placeholders)) {
-                    for (Player online : Bukkit.getOnlinePlayers()) {
-                        if (voter != null && online.getUniqueId().equals(voter.getUniqueId())) {
-                            continue;
-                        }
-                        if (isVoteAnnouncementMuted(online.getUniqueId(), online.getName())) {
-                            continue;
-                        }
-                        online.sendMessage(line);
-                    }
-                }
-                for (Player online : Bukkit.getOnlinePlayers()) {
-                    if (voter != null && online.getUniqueId().equals(voter.getUniqueId())) {
-                        continue;
-                    }
-                    if (isVoteAnnouncementMuted(online.getUniqueId(), online.getName())) {
-                        continue;
-                    }
-                    soundService.play(online, "vote.announcement");
-                }
-            }
-
-            Player player = Bukkit.getPlayer(uuid);
-            if (player != null) {
-                soundService.play(player, "vote.announcement");
-                showTitle(player, "vote.title", "vote.subtitle", placeholders);
-                if (playerGoalCompleted) soundService.play(player, "goal.completed");
-
-                for (Integer threshold : monthlyGoalsReached) {
-                    Map<String, String> mp = new HashMap<>(placeholders);
-                    mp.put("goal", Integer.toString(threshold));
-                    for (var line : messageService.messages("player-monthly-goal-completed", mp)) {
-                        player.sendMessage(line);
-                    }
-                }
-
-                if (doubleSiteBonusCompleted) {
-                    String bonusMessage = config.doubleSiteBonusMessage();
-                    if (bonusMessage != null && !bonusMessage.isBlank()) {
-                        String withPrefix = bonusMessage.replace("%prefix%", messageService.text("prefix", Map.of()));
-                        player.sendMessage(messageService.parse(messageService.applyPlaceholders(withPrefix, placeholders)));
-                    }
-                }
-                runForcedServiceCommand(player, serviceName);
-            }
-
-            if (globalGoalCompleted) soundService.playToAll("goal.completed");
-
-            for (Integer threshold : globalDailyReached) {
-                Map<String, String> gp = new HashMap<>(placeholders);
-                gp.put("goal", Integer.toString(threshold));
-                for (var line : messageService.messages("global-goal-completed-broadcast", gp)) {
-                    Bukkit.broadcast(line);
-                }
-            }
-
-            for (Integer threshold : recurringReached) {
-                Map<String, String> rp = new HashMap<>(placeholders);
-                rp.put("goal", Integer.toString(threshold));
-                for (var line : messageService.messages("global-recurring-goal-completed-broadcast", rp)) {
-                    Bukkit.broadcast(line);
-                }
-            }
-
-            for (List<String> commands : pendingCommands) {
-                rewardExecutor.execute(commands, placeholders);
-            }
-            for (Integer threshold : recurringReached) {
-                Map<String, String> rp = new HashMap<>(placeholders);
-                rp.put("goal", Integer.toString(threshold));
-                rewardExecutor.execute(config.globalRecurringCommands(), rp);
-            }
-        });
+    private void refreshSnapshot(PlayerIdentity identity) {
+        PlayerStats stats = ledger.readStats(identity.uuid(), identity.exactName());
+        boolean triple = ledger.distinctServicesToday(identity.uuid()) >= configService.get().doubleSiteBonusRequiredSites();
+        snapshots.updatePlayer(stats, triple, currentDay());
+        snapshots.setGlobal(ledger.readGlobalDaily(), currentDay());
     }
 
-    // â”€â”€ Stats normalization â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-    private PlayerStats normalizeForCurrentPeriod(Connection connection, PlayerStats stats, DateContext context) throws SQLException {
-        double dailyVotes = stats.dailyVotes();
-        double monthlyVotes = stats.monthlyVotes();
-        boolean changed = false;
-
-        if (!Objects.equals(stats.lastVoteDay(), context.dayKey())) { dailyVotes = 0; changed = true; }
-        if (!Objects.equals(stats.lastMonthKey(), context.monthKey())) { monthlyVotes = 0; changed = true; }
-
-        if (!changed) return stats;
-
-        repo.updatePlayerStats(connection, stats.uuid(), stats.name(), stats.totalVotes(), dailyVotes,
-                monthlyVotes, stats.streakMonthly(), stats.lastVoteDay(), stats.lastMonthKey(), stats.lastVoteEpoch());
-
-        return new PlayerStats(stats.uuid(), stats.name(), stats.totalVotes(), dailyVotes, monthlyVotes,
-                stats.streakMonthly(), stats.lastVoteDay(), stats.lastMonthKey(), stats.lastVoteEpoch());
-    }
-
-    private int computeMonthlyStreak(int previousStreak, String previousMonth, String currentMonth) {
-        if (previousMonth == null || previousMonth.isBlank()) return 1;
-        if (Objects.equals(previousMonth, currentMonth)) return previousStreak;
-        YearMonth expectedPrevious = YearMonth.parse(currentMonth).minusMonths(1);
-        return Objects.equals(previousMonth, expectedPrevious.toString()) ? previousStreak + 1 : 1;
-    }
-
-    // â”€â”€ Placeholders â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-    private void fillPlaceholders(Map<String, String> placeholders, UUID uuid, String playerName,
-                                   String serviceName, double amount, double total, double daily,
-                                   double monthly, int streakMonthly, double globalDaily) {
-        placeholders.put("player", playerName);
-        placeholders.put("uuid", uuid.toString());
-        placeholders.put("service", serviceName);
-        placeholders.put("amount", formatDouble(amount));
-        placeholders.put("multiplier", "1");
-        placeholders.put("total", formatDouble(total));
-        placeholders.put("daily", formatDouble(daily));
-        placeholders.put("monthly", formatDouble(monthly));
-        placeholders.put("streak_monthly", Integer.toString(streakMonthly));
-        placeholders.put("streak_daily", "0");
-        placeholders.put("streak_weekly", "0");
-        placeholders.put("daily_global", formatDouble(globalDaily));
-    }
-
-    // â”€â”€ Utils â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-    DateContext currentContext() {
-        ZoneId zoneId = ZoneId.of(configService.get().timezone());
-        ZonedDateTime now = ZonedDateTime.now(zoneId);
-        ZonedDateTime dayStart = now.toLocalDate().atStartOfDay(zoneId);
-        return new DateContext(
-                now.toLocalDate().toString(),
-                java.time.YearMonth.from(now).toString(),
-                now.toEpochSecond(),
-                dayStart.toEpochSecond(),
-                dayStart.plusDays(1).toEpochSecond()
+    private void notifyAccepted(PlayerIdentity identity, VoteEventResult result) {
+        if (!accepting.get()) return;
+        Player voter = Bukkit.getPlayerExact(identity.exactName());
+        if (voter == null || !voter.isOnline() || !voter.getUniqueId().equals(identity.uuid())) return;
+        PlayerStats stats = getStats(identity.uuid(), identity.exactName());
+        Map<String, String> placeholders = Map.of(
+                "player", identity.exactName(),
+                "total", formatDouble(stats.totalVotes()),
+                "daily", formatDouble(stats.dailyVotes()),
+                "monthly", formatDouble(stats.monthlyVotes()),
+                "global_daily", formatDouble(getGlobalDailyVotes()),
+                "monthly_bonus", "", "double_site_bonus", ""
         );
-    }
-
-    private int nextRecurringThreshold(int value, int step) {
-        int mod = value % step;
-        return mod == 0 ? value + step : value + (step - mod);
-    }
-
-    private int nextRecurringThresholdFromBase(int currentValue, int startAfter, int step) {
-        int first = startAfter + step;
-        if (currentValue < first) {
-            return first;
+        soundService.play(voter, "vote.announcement");
+        voter.showTitle(Title.title(messageService.titlePart("vote.title", placeholders),
+                messageService.titlePart("vote.subtitle", placeholders),
+                Title.Times.times(Duration.ofMillis(300), Duration.ofSeconds(2), Duration.ofMillis(500))));
+        voter.sendActionBar(messageService.actionbar("vote-progress", Map.of(
+                "daily", formatDouble(stats.dailyVotes()),
+                "next_global_goal", Integer.toString(nextGlobalGoal(getGlobalDailyVotes())))));
+        for (VoteNotice notice : result.notices()) {
+            Map<String, String> goal = Map.of("goal", Integer.toString(notice.threshold()),
+                    "player", identity.exactName());
+            switch (notice.kind()) {
+                case "MONTHLY_GOAL", "MONTHLY_STREAK" -> {
+                    messageService.send(voter, "player-monthly-goal-completed", goal);
+                    soundService.play(voter, "goal.completed");
+                }
+                case "TRIPLE_SITE" -> {
+                    voter.sendMessage(messageService.component(configService.get().doubleSiteBonusMessage(), goal));
+                    soundService.play(voter, "goal.completed");
+                }
+                case "GLOBAL_GOAL", "GLOBAL_RECURRING" -> {
+                    String key = notice.kind().equals("GLOBAL_GOAL")
+                            ? "global-goal-completed-broadcast" : "global-recurring-goal-completed-broadcast";
+                    for (Player online : Bukkit.getOnlinePlayers()) messageService.send(online, key, goal);
+                    soundService.playToAll("goal.completed");
+                }
+                default -> { }
+            }
         }
-        int delta = currentValue - startAfter;
-        int mod = delta % step;
-        return mod == 0 ? currentValue + step : currentValue + (step - mod);
+        if (configService.get().broadcastOnVote()) {
+            for (var component : messageService.messages("vote-broadcast", placeholders)) {
+                for (Player online : Bukkit.getOnlinePlayers()) {
+                    if (!online.getUniqueId().equals(identity.uuid()) && !isVoteAnnouncementMuted(online.getUniqueId(), online.getName())) {
+                        online.sendMessage(component);
+                    }
+                }
+            }
+        }
+        plugin.getLogger().info("Provider vote planned: event=" + shortId(result.eventHash()));
     }
 
-    private void runForcedServiceCommand(Player player, String serviceName) {
-        List<String> commands = configService.get().forcedServiceCommands(serviceName);
-        if (commands.isEmpty()) return;
-        Bukkit.getScheduler().runTask(plugin, () -> {
-            if (!player.isOnline()) return;
-            for (String raw : commands) {
-                String command = raw.startsWith("/") ? raw.substring(1) : raw;
-                try {
-                    if (Bukkit.dispatchCommand(player, command)) {
-                        plugin.getLogger().info("Comando forzado ejecutado para " + player.getName() + " (" + serviceName + "): /" + command);
+    private void drainPlayerGrants(UUID uuid) {
+        if (!accepting.get() || !drainingPlayers.add(uuid)) return;
+        claimAndDispatch(uuid, false);
+    }
+
+    private void drainGlobalGrants() {
+        if (!accepting.get() || !drainingGlobal.compareAndSet(false, true)) return;
+        claimAndDispatch(null, true);
+    }
+
+    private void claimAndDispatch(UUID uuid, boolean global) {
+        CompletableFuture.supplyAsync(() -> global ? ledger.claimNextGlobalGrant() : ledger.claimNextGrant(uuid), writer)
+                .thenAccept(optional -> {
+                    if (optional.isEmpty()) {
+                        if (global) drainingGlobal.set(false); else drainingPlayers.remove(uuid);
                         return;
                     }
-                    plugin.getLogger().warning("Comando forzado no reconocido para " + player.getName() + " (" + serviceName + "): /" + command);
-                } catch (Exception exception) {
-                    plugin.getLogger().warning("Fallo comando forzado para " + player.getName() + " (" + serviceName + "): /" + command + " -> " + exception.getMessage());
-                }
+                    scheduleMain(() -> dispatchClaim(optional.orElseThrow(), uuid, global));
+                });
+    }
+
+    private void dispatchClaim(GrantClaim claim, UUID uuid, boolean global) {
+        GrantDispatcher.DispatchResult result = dispatcher.dispatch(claim);
+        CompletableFuture.runAsync(() -> {
+            switch (result) {
+                case DONE -> ledger.markDoneAfterDispatch(claim.grantId(), claim.claimToken());
+                case NOT_DISPATCHED -> ledger.releaseBeforeDispatch(claim.grantId(), claim.claimToken(), "target unavailable before dispatch");
+                case AMBIGUOUS -> ledger.markAmbiguousAfterDispatch(claim.grantId(), claim.claimToken(), "dispatch returned false or threw");
             }
-            plugin.getLogger().warning("No se pudo ejecutar ningun comando forzado para " + player.getName() + " en servicio " + serviceName + ": " + String.join(", ", commands));
+        }, writer).thenRun(() -> {
+            if (result == GrantDispatcher.DispatchResult.NOT_DISPATCHED) {
+                if (global) drainingGlobal.set(false); else drainingPlayers.remove(uuid);
+            } else {
+                claimAndDispatch(uuid, global);
+            }
         });
     }
 
-    private void showTitle(Player player, String titleKey, String subtitleKey, Map<String, String> placeholders) {
-        Title title = Title.title(
-                messageService.titlePart(titleKey, placeholders),
-                messageService.titlePart(subtitleKey, placeholders),
-                Title.Times.times(Duration.ofMillis(200), Duration.ofMillis(2000), Duration.ofMillis(400))
-        );
-        player.showTitle(title);
+    private void scheduleMain(Runnable task) {
+        if (!accepting.get() || !plugin.isEnabled()) return;
+        Bukkit.getScheduler().runTask(plugin, () -> {
+            if (accepting.get() && plugin.isEnabled()) task.run();
+        });
+    }
+
+    private void requireMainThread() {
+        if (!Bukkit.isPrimaryThread()) throw new IllegalStateException("vVotes main-thread boundary violated");
+    }
+
+    private String shortId(String id) { return id == null ? "unknown" : id.substring(0, Math.min(12, id.length())); }
+    private String currentDay() { return LocalDate.now(ZoneId.of(configService.get().timezone())).toString(); }
+    private String currentMonth() { return YearMonth.now(ZoneId.of(configService.get().timezone())).toString(); }
+
+    public boolean isAccepting() { return accepting.get(); }
+
+    static VoteEnvelope applyProviderPolicy(VoteEnvelope event, boolean processTestVotes) {
+        return event.testVote() && !processTestVotes ? event.quarantined() : event;
     }
 }

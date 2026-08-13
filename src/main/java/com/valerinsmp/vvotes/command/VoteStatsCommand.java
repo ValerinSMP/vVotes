@@ -6,6 +6,7 @@ import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
+import org.bukkit.Bukkit;
 
 import java.util.Map;
 
@@ -18,9 +19,19 @@ public final class VoteStatsCommand implements CommandExecutor {
 
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
+        if (!Bukkit.isPrimaryThread()) {
+            String[] snapshot = args.clone();
+            scheduleOnMain(sender, command.getName(), label, snapshot);
+            return true;
+        }
+        show(plugin, sender);
+        return true;
+    }
+
+    static void show(VVotesPlugin plugin, CommandSender sender) {
         if (!(sender instanceof Player player)) {
             plugin.getMessageService().send(sender, "player-only");
-            return true;
+            return;
         }
 
         PlayerStats stats = plugin.getVoteService().getStats(player.getUniqueId(), player.getName());
@@ -37,6 +48,21 @@ public final class VoteStatsCommand implements CommandExecutor {
         );
 
         plugin.getMessageService().send(player, "vote-status", placeholders);
-        return true;
+    }
+
+    private void scheduleOnMain(CommandSender sender, String commandName, String label, String[] args) {
+        java.util.UUID playerId = sender instanceof Player player ? player.getUniqueId() : null;
+        String exactName = sender instanceof Player player ? player.getName() : "";
+        Bukkit.getScheduler().runTask(plugin, () -> {
+            if (!plugin.isEnabled()) return;
+            Command resolvedCommand = plugin.getCommand(commandName);
+            if (resolvedCommand == null) return;
+            if (playerId == null) {
+                onCommand(Bukkit.getConsoleSender(), resolvedCommand, label, args);
+                return;
+            }
+            Player player = Bukkit.getPlayerExact(exactName);
+            if (player != null && player.getUniqueId().equals(playerId)) onCommand(player, resolvedCommand, label, args);
+        });
     }
 }

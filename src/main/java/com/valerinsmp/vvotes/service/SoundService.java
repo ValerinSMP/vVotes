@@ -9,106 +9,90 @@ import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Player;
 
-import java.io.File;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.HashMap;
+import java.util.Locale;
 import java.util.Map;
 
 public final class SoundService {
     private final VVotesPlugin plugin;
-    private final Map<String, SoundEntry> sounds;
+    private volatile SoundCatalog catalog;
 
     public SoundService(VVotesPlugin plugin) {
         this.plugin = plugin;
-        this.sounds = new HashMap<>();
-        reload();
+        apply(loadCandidate());
     }
 
-    public void reload() {
-        sounds.clear();
-        File file = new File(plugin.getDataFolder(), "sound.yml");
-        YamlConfiguration configuration = YamlConfiguration.loadConfiguration(file);
-        ConfigurationSection section = configuration.getConfigurationSection("sounds");
-        if (section == null) {
-            return;
+    public SoundCatalog loadCandidate() {
+        Path path = plugin.getDataFolder().toPath().resolve("sound.yml");
+        try {
+            String text = Files.readString(path, StandardCharsets.UTF_8);
+            YamlConfiguration yaml = new YamlConfiguration();
+            yaml.loadFromString(text.startsWith("\uFEFF") ? text.substring(1) : text);
+            Map<String, SoundEntry> sounds = new HashMap<>();
+            ConfigurationSection section = yaml.getConfigurationSection("sounds");
+            if (section != null) loadSection(section, "", sounds);
+            return new SoundCatalog(Map.copyOf(sounds));
+        } catch (Exception exception) {
+            throw new IllegalStateException("sound.yml invalido: " + exception.getMessage(), exception);
         }
-        loadSection(section, "");
+    }
+
+    public void apply(SoundCatalog candidate) {
+        this.catalog = candidate;
     }
 
     public void play(Player player, String key) {
-        if (player == null) {
-            return;
-        }
-        SoundEntry entry = sounds.get(key.toLowerCase());
-        if (entry == null || !entry.enabled) {
-            return;
-        }
-        player.playSound(player.getLocation(), entry.sound, entry.volume, entry.pitch);
+        if (player == null) return;
+        SoundEntry entry = catalog.sounds().get(key.toLowerCase(Locale.ROOT));
+        if (entry == null || !entry.enabled()) return;
+        player.playSound(player.getLocation(), entry.sound(), entry.volume(), entry.pitch());
     }
 
     public void playToAll(String key) {
-        SoundEntry entry = sounds.get(key.toLowerCase());
-        if (entry == null || !entry.enabled) {
-            return;
-        }
+        SoundEntry entry = catalog.sounds().get(key.toLowerCase(Locale.ROOT));
+        if (entry == null || !entry.enabled()) return;
         for (Player player : Bukkit.getOnlinePlayers()) {
-            player.playSound(player.getLocation(), entry.sound, entry.volume, entry.pitch);
+            player.playSound(player.getLocation(), entry.sound(), entry.volume(), entry.pitch());
         }
     }
 
-    private void loadSection(ConfigurationSection section, String prefix) {
+    private void loadSection(ConfigurationSection section, String prefix, Map<String, SoundEntry> target) {
         for (String key : section.getKeys(false)) {
             String path = prefix.isEmpty() ? key : prefix + "." + key;
             ConfigurationSection child = section.getConfigurationSection(key);
-            if (child != null) {
-                if (child.contains("sound")) {
-                    parseEntry(path, child);
-                } else {
-                    loadSection(child, path);
-                }
+            if (child == null) continue;
+            if (!child.contains("sound")) {
+                loadSection(child, path, target);
+                continue;
             }
+            String name = child.getString("sound", "").strip();
+            Sound sound = resolveSound(name);
+            if (sound == null) throw new IllegalArgumentException("Sonido invalido: " + path + " -> " + name);
+            double volume = child.getDouble("volume", 1D);
+            double pitch = child.getDouble("pitch", 1D);
+            if (volume < 0 || volume > 4 || pitch < 0 || pitch > 2) {
+                throw new IllegalArgumentException("Volumen o pitch fuera de rango: " + path);
+            }
+            target.put(path.toLowerCase(Locale.ROOT), new SoundEntry(child.getBoolean("enabled", true), sound,
+                    (float) volume, (float) pitch));
         }
-    }
-
-    private void parseEntry(String path, ConfigurationSection section) {
-        String soundName = section.getString("sound", "");
-        if (soundName.isBlank()) {
-            return;
-        }
-        Sound sound = resolveSound(soundName);
-        if (sound == null) {
-            plugin.getLogger().warning("Sonido invalido en sound.yml: " + path + " -> " + soundName);
-            return;
-        }
-        boolean enabled = section.getBoolean("enabled", true);
-        float volume = (float) section.getDouble("volume", 1.0D);
-        float pitch = (float) section.getDouble("pitch", 1.0D);
-        sounds.put(path.toLowerCase(), new SoundEntry(enabled, sound, volume, pitch));
-    }
-
-    private record SoundEntry(boolean enabled, Sound sound, float volume, float pitch) {
     }
 
     private Sound resolveSound(String raw) {
-        String input = raw.trim();
-        if (input.isBlank()) {
-            return null;
-        }
-
-        // 1) Backward compatible enum style: BLOCK_RESPAWN_ANCHOR_CHARGE
-        String enumLike = input.toUpperCase().replace(' ', '_');
+        if (raw.isBlank()) return null;
+        String enumLike = raw.toUpperCase(Locale.ROOT).replace(' ', '_');
         try {
-            @SuppressWarnings("removal")
-            Sound legacy = Sound.valueOf(enumLike);
+            @SuppressWarnings("removal") Sound legacy = Sound.valueOf(enumLike);
             return legacy;
-        } catch (IllegalArgumentException ignored) {
-        }
-
-        // 2) Namespaced key style: minecraft:block.respawn_anchor.charge
-        String normalized = input.toLowerCase().replace(' ', '_');
+        } catch (IllegalArgumentException ignored) { }
+        String normalized = raw.toLowerCase(Locale.ROOT).replace(' ', '_');
         NamespacedKey key = NamespacedKey.fromString(normalized.contains(":") ? normalized : "minecraft:" + normalized);
-        if (key == null) {
-            return null;
-        }
-        return Registry.SOUNDS.get(key);
+        return key == null ? null : Registry.SOUNDS.get(key);
     }
+
+    public record SoundCatalog(Map<String, SoundEntry> sounds) { }
+    public record SoundEntry(boolean enabled, Sound sound, float volume, float pitch) { }
 }

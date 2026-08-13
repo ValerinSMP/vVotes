@@ -48,7 +48,7 @@ tasks.test {
 
 tasks.shadowJar {
     archiveClassifier.set("")
-    relocate("org.sqlite", "com.valerinsmp.vvotes.libs.sqlite")
+    mergeServiceFiles()
 }
 
 tasks.build {

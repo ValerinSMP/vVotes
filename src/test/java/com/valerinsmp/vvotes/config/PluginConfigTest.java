@@ -13,6 +13,7 @@ class PluginConfigTest {
         PluginConfig defaults = PluginConfig.defaultConfig();
         PluginConfig config = new PluginConfig(
                 defaults.sqliteFile(), defaults.busyTimeoutMs(), defaults.timezone(),
+                defaults.processTestVotes(),
                 defaults.broadcastOnVote(), defaults.suspiciousWindowSeconds(),
                 Map.of("planetminecraft", List.of("reward %player%")),
                 defaults.globalDailyGoals(), defaults.globalRecurringStart(),

@@ -3,23 +3,26 @@ version: '${version}'
 main: com.valerinsmp.vvotes.VVotesPlugin
 api-version: '1.21'
 authors: [ValerinSMP]
-softdepend: [PlaceholderAPI, VotifierPlus]
+description: Sistema de votos, metas y sorteos de ValerinSMP.
+website: https://github.com/ValerinSMP/vVotes
+depend: [VotifierPlus]
+softdepend: [PlaceholderAPI]
 commands:
   vote:
-    description: Ayuda del sistema de votos.
-    usage: /vote
+    description: Alias público de ayuda, estadísticas e información.
+    usage: /vote [help|stats|about]
     permission: vvotes.use
   votestats:
     description: Muestra tus estadisticas de votos.
     usage: /votestats
     permission: vvotes.use
   vvotes:
-    description: Configuracion personal de anuncios de votos.
-    usage: /vvotes toggle
+    description: Comando público canónico de vVotes.
+    usage: /vvotes <help|about|stats|toggle>
     permission: vvotes.use
   vvotesadmin:
     description: Administracion de vVotes.
-    usage: /vvotesadmin <help|about|reload|add|resetdaily|resetmonthly|adddaily|removedaily|addglobaldaily|removeglobaldaily|drawmonthly|drawhistory|topmonth>
+    usage: /vvotesadmin <help|about|reload|add|resetdaily|resetmonthly|adddaily|removedaily|addglobaldaily|removeglobaldaily|drawmonthly|drawhistory|topmonth|ambiguous>
     aliases: [voteadmin]
     permission: vvotes.admin
 permissions:

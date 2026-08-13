@@ -5,36 +5,39 @@ import com.valerinsmp.vvotes.command.VoteCommand;
 import com.valerinsmp.vvotes.command.VoteStatsCommand;
 import com.valerinsmp.vvotes.command.VVotesCommand;
 import com.valerinsmp.vvotes.config.ConfigService;
-import com.valerinsmp.vvotes.db.DatabaseManager;
+import com.valerinsmp.vvotes.config.PluginConfig;
 import com.valerinsmp.vvotes.listener.VoteListener;
 import com.valerinsmp.vvotes.papi.VVotesExpansion;
-import com.valerinsmp.vvotes.reward.CommandRewardExecutor;
+import com.valerinsmp.vvotes.reward.GrantDispatcher;
 import com.valerinsmp.vvotes.service.MessageService;
 import com.valerinsmp.vvotes.service.SoundService;
 import com.valerinsmp.vvotes.service.MonthlyDrawResult;
 import com.valerinsmp.vvotes.service.VoteService;
+import com.valerinsmp.vvotes.service.VoteLedger;
+import com.valerinsmp.vvotes.service.VotePlan;
 import org.bukkit.Bukkit;
 import org.bukkit.command.PluginCommand;
-import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.event.HandlerList;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitTask;
 
-import java.io.File;
-import java.io.InputStream;
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.time.Clock;
+import java.time.ZoneId;
 
 public final class VVotesPlugin extends JavaPlugin {
 
     private ConfigService configService;
     private MessageService messageService;
     private SoundService soundService;
-    private DatabaseManager databaseManager;
     private VoteService voteService;
     private VVotesExpansion placeholderExpansion;
     private BukkitTask monthlyDrawTask;
+    private VoteLedger voteLedger;
 
     @Override
     public void onEnable() {
@@ -44,16 +47,19 @@ public final class VVotesPlugin extends JavaPlugin {
         saveDefaultConfig();
         saveResourceIfMissing("messages.yml");
         saveResourceIfMissing("sound.yml");
-        ensureYamlDefaults();
+        migrateExactLegacyDefault("config.yml", "2FE58537EC25FB5C7190C6B35DDA313D77BF5E7DDF8C6C8166A1AF00CF7E9D2D");
+        migrateExactLegacyDefault("messages.yml", "C38BF335EEF48C7E1573F19DE7485D956EE102B0D7AFBD58A133D3B765F0D5CC");
 
         this.configService = new ConfigService(this);
-        this.messageService = new MessageService(this, configService);
+        this.messageService = new MessageService(this);
         this.soundService = new SoundService(this);
-        this.databaseManager = new DatabaseManager(this, configService);
-        this.databaseManager.initialize();
-
-        CommandRewardExecutor rewardExecutor = new CommandRewardExecutor(this);
-        this.voteService = new VoteService(this, configService, messageService, soundService, databaseManager, rewardExecutor);
+        VotePlan.from(configService.get(), "startup-validation");
+        this.voteLedger = new VoteLedger(resolveDatabasePath(configService.get()), configService.get().busyTimeoutMs(),
+                Clock.systemUTC(), ZoneId.of(configService.get().timezone()));
+        this.voteLedger.initialize();
+        this.voteService = new VoteService(this, configService, messageService, soundService,
+                voteLedger, new GrantDispatcher());
+        this.voteService.start();
 
         registerCommands();
         registerListeners();
@@ -67,11 +73,12 @@ public final class VVotesPlugin extends JavaPlugin {
     public void onDisable() {
         long startedAt = System.nanoTime();
         getLogger().info("Stopping vVotes...");
-        unregisterPlaceholderExpansion();
+        if (voteService != null) voteService.stopAccepting();
         stopMonthlyDrawTask();
+        unregisterPlaceholderExpansion();
         HandlerList.unregisterAll(this);
-        if (databaseManager != null) {
-            databaseManager.close();
+        if (voteService != null) {
+            voteService.close();
         }
         long elapsedMs = (System.nanoTime() - startedAt) / 1_000_000L;
         getLogger().info("Disabled successfully in " + elapsedMs + " ms.");
@@ -79,20 +86,15 @@ public final class VVotesPlugin extends JavaPlugin {
 
     public void reloadPlugin() {
         try {
+            PluginConfig configCandidate = configService.loadCandidate();
+            configService.requireRuntimeCompatible(configCandidate);
+            VotePlan.from(configCandidate, "reload-validation");
+            MessageService.MessageCatalog messagesCandidate = messageService.loadCandidate();
+            SoundService.SoundCatalog soundsCandidate = soundService.loadCandidate();
             stopMonthlyDrawTask();
-            if (databaseManager != null) {
-                databaseManager.close();
-            }
-
-            reloadConfig();
-            ensureYamlDefaults();
-            configService.reload();
-            messageService.reload();
-            soundService.reload();
-            databaseManager.initialize();
-            voteService.invalidateStatsCache();
-            voteService.sealGoalsForCurrentDay();
-            registerPlaceholderExpansion();
+            configService.apply(configCandidate);
+            messageService.apply(messagesCandidate);
+            soundService.apply(soundsCandidate);
             startMonthlyDrawTask();
         } catch (Exception exception) {
             getLogger().severe("Error recargando plugin: " + exception.getMessage());
@@ -137,17 +139,22 @@ public final class VVotesPlugin extends JavaPlugin {
 
         PluginCommand vvotes = getCommand("vvotes");
         if (vvotes != null) {
-            vvotes.setExecutor(new VVotesCommand(this));
+            VVotesCommand command = new VVotesCommand(this);
+            vvotes.setExecutor(command);
+            vvotes.setTabCompleter(command);
         }
     }
 
     private void registerListeners() {
-        if (Bukkit.getPluginManager().isPluginEnabled("VotifierPlus")) {
-            getServer().getPluginManager().registerEvents(new VoteListener(this, voteService), this);
-            getLogger().info("Integration: VotifierPlus enabled.");
-        } else {
-            getLogger().info("Integration: VotifierPlus not present; vote events are disabled.");
-        }
+        getServer().getPluginManager().registerEvents(new VoteListener(this, voteService), this);
+        getLogger().info("Integration enabled: VotifierPlus");
+    }
+
+    private Path resolveDatabasePath(PluginConfig config) {
+        Path data = getDataFolder().toPath().toAbsolutePath().normalize();
+        Path path = data.resolve(config.sqliteFile()).normalize();
+        if (!path.startsWith(data)) throw new IllegalArgumentException("SQLite path escapes plugin data folder");
+        return path;
     }
 
     private void registerPlaceholderExpansion() {
@@ -174,11 +181,12 @@ public final class VVotesPlugin extends JavaPlugin {
         }
         int everyMinutes = Math.max(1, configService.get().monthlyDrawAutoCheckMinutes());
         long periodTicks = everyMinutes * 60L * 20L;
-        monthlyDrawTask = Bukkit.getScheduler().runTaskTimerAsynchronously(this, () -> {
-            MonthlyDrawResult result = voteService.runAutoMonthlyDrawIfNeeded();
-            if (result.status() == MonthlyDrawResult.Status.SUCCESS) {
-                getLogger().info("Sorteo mensual automatico ejecutado para " + result.monthKey() + ", ganador: " + result.winnerName());
-            }
+        monthlyDrawTask = Bukkit.getScheduler().runTaskTimer(this, () -> {
+            voteService.drawMonthlyAsync(null, "auto").thenAccept(result -> {
+                if (result.status() == MonthlyDrawResult.Status.SUCCESS) {
+                    getLogger().info("Sorteo mensual automatico ejecutado para " + result.monthKey());
+                }
+            });
         }, 20L, periodTicks);
     }
 
@@ -189,80 +197,17 @@ public final class VVotesPlugin extends JavaPlugin {
         }
     }
 
-    private void ensureYamlDefaults() {
-        mergeYamlDefaults("config.yml");
-        reloadConfig();
-        mergeYamlDefaults("messages.yml");
-        mergeYamlDefaults("sound.yml");
-    }
-
-    private void mergeYamlDefaults(String resourceName) {
-        File file = new File(getDataFolder(), resourceName);
-        if (!file.exists()) {
-            saveResource(resourceName, false);
-            return;
+    private void migrateExactLegacyDefault(String name, String expectedHash) {
+        Path path = getDataFolder().toPath().resolve(name);
+        try (var input = getResource(name)) {
+            if (input == null || !Files.isRegularFile(path)) return;
+            String actual = java.util.HexFormat.of().withUpperCase().formatHex(
+                    MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(path)));
+            if (!actual.equals(expectedHash)) return;
+            Files.write(path, input.readAllBytes());
+            getLogger().info("Migrated unchanged legacy default: " + name);
+        } catch (IOException | NoSuchAlgorithmException exception) {
+            throw new IllegalStateException("Unable to migrate legacy default " + name, exception);
         }
-
-        try (InputStream input = getResource(resourceName)) {
-            if (input == null) {
-                return;
-            }
-
-            YamlConfiguration current = loadYamlSafely(file);
-            YamlConfiguration defaults = loadYamlSafely(input);
-
-            boolean changed = false;
-            for (String path : defaults.getKeys(true)) {
-                if (!current.contains(path)) {
-                    current.set(path, defaults.get(path));
-                    changed = true;
-                }
-            }
-
-            if (changed) {
-                current.save(file);
-                getLogger().info("Se agregaron nuevas claves por defecto en " + resourceName);
-            }
-        } catch (Exception exception) {
-            getLogger().warning("No se pudieron fusionar defaults de " + resourceName + ": " + exception.getMessage());
-        }
-    }
-
-    private YamlConfiguration loadYamlSafely(File file) throws IOException {
-        String text = Files.readString(file.toPath(), StandardCharsets.UTF_8);
-        return loadYamlFromText(text);
-    }
-
-    private YamlConfiguration loadYamlSafely(InputStream input) throws IOException {
-        String text = new String(input.readAllBytes(), StandardCharsets.UTF_8);
-        return loadYamlFromText(text);
-    }
-
-    private YamlConfiguration loadYamlFromText(String rawText) {
-        String text = sanitizeYamlText(rawText);
-        YamlConfiguration yaml = new YamlConfiguration();
-        try {
-            yaml.loadFromString(text);
-        } catch (Exception exception) {
-            throw new IllegalStateException("YAML invalido tras saneamiento: " + exception.getMessage(), exception);
-        }
-        return yaml;
-    }
-
-    private String sanitizeYamlText(String input) {
-        String text = input.startsWith("\uFEFF") ? input.substring(1) : input;
-        StringBuilder sanitized = new StringBuilder(text.length());
-        for (int i = 0; i < text.length(); i++) {
-            char c = text.charAt(i);
-            if (c == '\n' || c == '\r' || c == '\t') {
-                sanitized.append(c);
-                continue;
-            }
-            if (Character.isISOControl(c)) {
-                continue;
-            }
-            sanitized.append(c);
-        }
-        return sanitized.toString();
     }
 }

@@ -1,14 +1,10 @@
-triple-site-bonus:
-  enabled: true
-  required-sites: 3
-  placeholder-icon: ' ☁ '
-  message: '%prefix%&a¡Has votado en los 3 sitios y ganado Fly por 1 hora!'
-  commands:
-  - voucher give %player% fly_1h 1
-
 storage:
   sqlite-file: data/vvotes.db
   busy-timeout-ms: 5000
+
+provider:
+  # TestVote confirma recepción y deduplicación sin crear economía por defecto.
+  process-test-votes: false
 
 timezone: America/Santiago
 
@@ -103,3 +99,11 @@ monthly-draw:
   min-votes: 1
   reward-command: lp user <player> parent addtemp arcano 30d
   auto-check-minutes: 5
+
+triple-site-bonus:
+  enabled: true
+  required-sites: 3
+  placeholder-icon: ' ☁ '
+  message: '<player> <green>votó en los tres sitios y recibió el bono.</green>'
+  commands:
+  - voucher give <player> fly_1h 1
